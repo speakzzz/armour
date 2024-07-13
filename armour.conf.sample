@@ -1319,6 +1319,7 @@ set addcmd(update)      {  arm       500        pub msg dcc  }
 #set addplugin(quote) "./armour/plugins/quote.tcl";           # -- quote management
 #set addplugin(openai) "./armour/plugins/openai.tcl";         # -- openai (ChatGPT)
 #set addplugin(speak) "./armour/plugins/speak.tcl";           # -- speak (text-to-speech)
+#set addplugin(summarise) "./armour/plugins/summarise.tcl";   # -- sumarise chans/people (requires openai)
 #set addplugin(ninjas) "./armour/plugins/ninjas.tcl";         # -- ninjas (jokes, facts, etc)
 #set addplugin(humour) "./armour/plugins/humour.tcl";         # -- humour (gifs, memes, etc)
 #set addplugin(weather) "./armour/plugins/weather.tcl";       # -- current weather by city

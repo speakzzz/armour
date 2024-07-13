@@ -66,6 +66,10 @@ proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
         reply $type $target "\002usage:\002 weather <city>"
         return;
     }
+    if {[string is digit $city]} {
+        reply $type $target "\002error:\002 city cannot be a ZIP code (too ambiguous)"
+        return;
+    }
 
     set cfgUnits [cfg:get weather:units $chan]
     if {$cfgUnits eq "both"} {

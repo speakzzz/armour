@@ -112,20 +112,18 @@ proc quote:cmd:quote {0 1 2 3 {4 ""} {5 ""}} {
 	set level [db:get level levels cid $cid uid $uid]
 
     # -- ensure user has required access for command
-    set allowed 2
-    # -- ensure user has required access for command
-	#set allowed [cfg:get quote:allow]; # -- who can use commands? (1-5)
-                                       #        1: all channel users
-									   #        2: only voiced, opped, and authed users
-                                       #        3: only voiced when not secure mode, opped, and authed users
-                        	           #        4: only opped and authed channel users
-                                       #        5: only authed users with command access
+	set allowed [cfg:get quote:allow];  # -- who can use commands? (1-5)
+                                        #        1: all channel users
+									    #        2: only voiced, opped, and authed users
+                                        #        3: only voiced when not secure mode, opped, and authed users
+                        	            #        4: only opped and authed channel users
+                                        #        5: only authed users with command access
     set allow 0
     if {$uid eq ""} { set authed 0 } else { set authed 1 }
     if {$allowed eq 0} { return; } \
     elseif {$allowed eq 1} { set allow 1 } \
-    elseif {$allowed eq 2} { if {[isop $nick $chan] || ([isvoice $nick $chan] && [dict get $dbchans $cid mode] ne "secure") || $authed} { set allow 1 } } \
-	elseif {$allowed eq 3} { if {[isop $nick $chan] || [isvoice $nick $chan] || $authed} { set allow 1 } } \
+	elseif {$allowed eq 2} { if {[isop $nick $chan] || [isvoice $nick $chan] || $authed} { set allow 1 } } \
+    elseif {$allowed eq 3} { if {[isop $nick $chan] || ([isvoice $nick $chan] && [dict get $dbchans $cid mode] ne "secure") || $authed} { set allow 1 } } \
     elseif {$allowed eq 4} { if {[isop $nick $chan] || $authed} { set allow 1 } } \
     elseif {$allowed eq 5} { if {$authed} { set allow [userdb:isAllowed $nick $cmd $chan $type] } }
     if {[userdb:isIgnored $nick $cid]} { set allow 0 }; # -- check if user is ignored
@@ -651,7 +649,7 @@ proc quote:correct {chan regex} {
 	variable lastspeak; # -- tracks the last line a nick spoke in a chan (by 'chan,nick')
 	variable dbchans;   # -- dict for db channels
 
-	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[dict get $dictData chan] eq $chan} }]]
+	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} }]]
 	if {$cid eq ""} { return; }; # -- channel not registered
 	if {[dict exists $dbchans $cid correct]} {
 		set correct [dict get $dbchans $cid correct]
@@ -768,7 +766,7 @@ proc quote:action {nick uhost hand dest keyword text} {
 proc quote:addspeak {nick uhost hand chan text} {
 	variable dbchans;   # -- dict with database channels
 	variable lastspeak; # -- tracks the last line a nick spoke in a chan (by 'chan,ts,nick')
-	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[dict get $dictData chan] eq $chan} }]]
+	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} }]]
 	if {$cid eq ""} { return; }; # -- channel not registered
 	set snick [split $nick]
 	set ts [clock milliseconds]; # -- track when spoken, to have race condition mitigation when someone does 'quote add last <nick>' and they very recently spoke something else

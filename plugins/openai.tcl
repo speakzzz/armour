@@ -185,6 +185,8 @@ proc arm:cmd:ask {0 1 2 3 {4 ""} {5 ""}} {
 
     set cmd "ask"
 
+    if {[get:val nick:newjoin $chan,$nick] ne ""} { return; }; # -- ignore newcomers
+
     set arg [join [join $arg]]
 
     set speak 0; set userprefix 1;
@@ -345,6 +347,8 @@ proc arm:cmd:and {0 1 2 3 {4 ""} {5 ""}} {
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
 
     set cmd "and"
+
+    if {[get:val nick:newjoin $chan,$nick] ne ""} { return; }; # -- ignore newcomers
 
     set arg [join [join $arg]]; # -- join the arg list
 
@@ -1427,21 +1431,8 @@ proc randfile {{ext "png"} {length ""} {chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg
     return $text
 }
 
-    set avail 0
-    while {!$avail} {
-        set length 5; # -- num of captcha ID chars
-        set chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        set range [expr {[string length $chars]-1}]
-        set code ""
-        for {set i 0} {$i < $length} {incr i} {
-        set pos [expr {int(rand()*$range)}]
-        append code [string range $chars $pos $pos]
-        }
-        set existcode [db:get code captcha code $code]
-        if {$existcode eq ""} { set avail 1; break }
-    }
-
 # -- create openai table
+db:connect
 db:query "CREATE TABLE IF NOT EXISTS openai (\
 	id INTEGER PRIMARY KEY AUTOINCREMENT,\
     type TEXT,\

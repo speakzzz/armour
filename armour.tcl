@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------------------------
-# armour.tcl v5.0 autobuild completed on: Fri Jun  7 09:39:58 PDT 2024
+# armour.tcl v5.0 autobuild completed on: Sat Jul 13 06:18:48 PDT 2024
 # ------------------------------------------------------------------------------------------------
 #
 #     _                                    
@@ -964,7 +964,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2024060802"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2024071300"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.0";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -3407,7 +3407,7 @@ proc bot:recv:port {bot cmd text} {
         
         if {$portnum >= $min} {
             kickban $nick $ident $host $chan [cfg:get ban:time $chan] [cfg:get portscan:reason $chan]
-            report black $chan "Armour: $target insecure host (\002open ports:\002 $openports \002reason:\002 install identd)"
+            report black $chan "Armour: $target insecure host in $chan (\002open ports:\002 $openports \002reason:\002 install identd)"
         }
     }
     return;
@@ -3458,7 +3458,7 @@ proc bot:recv:dnsbl {bot cmd text} {
     kickban $nick $ident $host $chan [cfg:get ban:time $chan] "Armour: DNSBL blacklisted (\002ip:\002 $ip \002rbl:\002 $rbl \002desc:\002 $desc)"
 
     if {$info == ""} { set xtra "" } else { set xtra " \002info:\002 $info" }
-    report black $chan "Armour: DNSBL match found on $target (\002ip:\002 $ip \002rbl:\002 $rbl \002desc:\002 $desc)"
+    report black $chan "Armour: DNSBL match found on $target in $chan (\002ip:\002 $ip \002rbl:\002 $rbl \002desc:\002 $desc)"
     return;
             
 }
@@ -3674,7 +3674,7 @@ proc chanlist:hit {chan nick uhost chanlist} {
                     # -- whitelist 
                     set mode [list:mode $id]
                     if {$mode ne ""} { mode:$mode $chan [join $nick] } elseif {[get:val chan:mode $chan] eq "secure"} { voice:give $chan $nick }
-                    report $list $nick "Armour: [join $nick]!$uhost ${list}listed (\002id:\002 $id \002type:\002 $method \002value:\002 $value \002action:\002 $action \002reason:\002 $reason)"
+                    report $list $nick "Armour: [join $nick]!$uhost ${list}listed in $chan (\002id:\002 $id \002type:\002 $method \002value:\002 $value \002action:\002 $action \002reason:\002 $reason)"
                 } else {
                     # -- blacklist
                     set string "Armour: blacklisted"
@@ -3695,7 +3695,7 @@ proc chanlist:hit {chan nick uhost chanlist} {
                     # -- double saftey net
                     if {$host ne ""} {
                         kickban $nick $ident $host $chan [cfg:get ban:time $chan] "$string" $id
-                        report $list $nick "Armour: $nick!$uhost ${list}listed (\002id:\002 $id \002type:\002 $method \002value:\002 $value \002reason:\002 $reason)"
+                        report $list $nick "Armour: $nick!$uhost ${list}listed in $chan (\002id:\002 $id \002type:\002 $method \002value:\002 $value \002reason:\002 $reason)"
                     }
                 }
                 hits:incr $id; # -- incr statistics
@@ -4309,6 +4309,10 @@ proc arm:cmd:help {0 1 2 3 {4 ""} {5 ""}} {
         }
         reply $stype $starget $out
         return; 
+    }
+
+    switch -- $command {
+        sum { set command "summarise" }
     }
         
     # -- find the help topic
@@ -7052,7 +7056,8 @@ proc arm:cmd:rem {0 1 2 3 {4 ""} {5 ""}} {
 # modify a whitelist or blacklist entry
 proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg;
-    variable entries;  # -- dict: blacklist and whitelist entries    
+    variable entries;  # -- dict: blacklist and whitelist entries  
+    variable dbchans;  # -- dict: database channels  
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
     
     set cmd "mod"
@@ -7070,7 +7075,6 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
     }
     set cid [db:get id channels chan $tchan]
     if {![userdb:isAllowed $nick $cmd $tchan $type]} { return; }
-    set log "$tchan [join $arg]"; set log [string trimright $log " "]
     
     set globlevel [db:get level levels cid 1 uid $uid]
     if {$globlevel eq ""} { set globlevel 0 }
@@ -7088,7 +7092,7 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
         return;    
     }
         
-    debug 4 "\002cmd:mod:\002 chan: $tchan -- ids: $ids -- param: $param -- setval: $setval"
+    debug 4 "\002cmd:mod:\002 ids: $ids -- param: $param -- setval: $setval"
     
     # -- loop over any entries
     foreach id [split $ids ,] {
@@ -7098,6 +7102,7 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
         if {$did eq ""} { reply $type $target "\002(\002error\002)\002: no such entry exists (\002id:\002 $id)"; continue; }
 
         set cid [dict get $entries $id cid]
+        set tchan [dict get $dbchans $cid chan]
         set ltype [dict get $entries $id type]
         set method [dict get $entries $id method]
         set value [dict get $entries $id value]
@@ -7147,7 +7152,7 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
             }
         }
         
-        debug 4 "\002cmd:mod:\002 id: $id -- param: $param isflag: $isflag"
+        debug 4 "\002cmd:mod:\002 id: $id -- param: $param -- isflag: $isflag"
         
         # -- list entry dependencies
         # -- allow null value to reset dependencies
@@ -7227,7 +7232,13 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
             if {$param eq "action"} {
                 if {$method eq "text"} { reply $type $target "\002error:\002 action does not apply to reply entries."; return; }
             }
-            set db_setval [db:escape $setval]
+
+            # -- check if value is already set
+            if {$value eq [join $setval]} {
+                reply $type $target "\002(\002error\002)\002 $tchan id: $id -- $param is already set to: \002[join $setval]\002."
+                return;
+            }
+            set db_setval [join [db:escape $setval]]
             set dictval $setval; set col $param;
             dict set entries $id $col $db_setval
         }
@@ -7242,12 +7253,13 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
             set setval [join $setval ,]
             if {$setval eq ""} { set setval "null" }
         }
-        debug 1 "arm:cmd:mod: modified $list $method entry: $value (chan: $tchan -- id: $id -- param: $setval)"
-        reply $type $target "modified $method $list entry (\002chan:\002 $tchan -- \002id:\002 $id -- \002value:\002 $value -- \002$param:\002 $setval)"
+        debug 1 "arm:cmd:mod: modified $list $method entry: $value (chan: $tchan -- id: $id -- param: $param -- value: [join $setval])"
+        reply $type $target "modified $method $list entry (\002chan:\002 $tchan -- \002id:\002 $id -- \002$param:\002 [join $setval])"
     }
     # -- end of foreach
     
     # -- create log entry for command use
+    set log "$tchan [join $arg]"; set log [string trimright $log " "]
     log:cmdlog BOT $tchan $cid $user $uid [string toupper $cmd] $log "$nick!$uh" "" "" ""
     return;
 }
@@ -9936,9 +9948,9 @@ proc scan {nick chan full clicks ident ip host xuser rname} {
             if {[dict exists $nickdata $lnick isoper]} {
                 if {[dict get $nickdata $lnick isoper] eq 1} {
                     set isoper [dict get $nickdata $lnick isoper]
-                    debug 0 "scan: $nick!$uhost is an IRC operator... exempting from scans and opping!"
+                    debug 0 "scan: $nick!$uhost in $chan is an IRC operator... exempting from scans and opping!"
                     set exempt 1; set dnsbl 0; set portscan 0; set ipscan 0;
-                    report operop $nick "Armour: $nick!$uhost is an IRC Operator (operop)" $chan
+                    report operop $nick "Armour: $nick!$uhost in $chan is an IRC Operator (operop)" $chan
                     mode:op $chan "$nick"
                 }
             }
@@ -10135,7 +10147,7 @@ proc scan {nick chan full clicks ident ip host xuser rname} {
                 }
             } else { break; }; #-- safety net 
             if {$silent eq 0} {
-                set report "Armour: $nick!$ident@$host ${list}listed (\002id:\002 $depids \002type:\002 $method"
+                set report "Armour: $nick!$ident@$host ${list}listed in $chan (\002id:\002 $depids \002type:\002 $method"
                 if {[cfg:get report:value $chan]} { append report " \002value:\002 $value" }
                 if {[cfg:get report:reason $chan]} { append report " \002reason:\002 $reason" }
                 append report ")"
@@ -10211,7 +10223,7 @@ proc scan {nick chan full clicks ident ip host xuser rname} {
                     kickban $nick $ident $host $chan [cfg:get ban:time $chan] $string
                 }
                 if {$info eq ""} { set xtra "" } else { set xtra "\002info:\002 $info" }
-                report $dnslist $chan "Armour: DNS[string toupper $dnsshort] match found on $nick!$ident@$host (\002ip:\002 $ip \002rbl:\002 $rbl \002desc:\002 $desc)"
+                report $dnslist $chan "Armour: DNS[string toupper $dnsshort] match found on $nick!$ident@$host in $chan (\002ip:\002 $ip \002rbl:\002 $rbl \002desc:\002 $desc)"
                 scan:cleanup $nick $chan; # -- cleanup vars
                 return;    
             } else {
@@ -10258,7 +10270,7 @@ proc scan {nick chan full clicks ident ip host xuser rname} {
                 # -- truncate reason for X bans
                 if {[cfg:get chan:method $chan] in "2 3" && [string length $string] >= 124} { set string "[string range $string 0 124]..." }
                 kickban $nick $ident $host $chan [cfg:get ban:time $chan] $string
-                report black $chan "Armour: $nick!$ident@$host insecure host (\002open ports:\002 $openports \002reason:\002 install identd)"
+                report black $chan "Armour: $nick!$ident@$host insecure host in $chan (\002open ports:\002 $openports \002reason:\002 install identd)"
                 scan:cleanup $nick $chan; # -- cleanup vars
                 return;
             }
@@ -10467,10 +10479,17 @@ proc scan:continue {nick ident ip host xuser rname chan asn country subnet} {
     if {![info exists scan:list(nicks,$lchan)]} { set scan:list(nicks,$lchan) "" } else { debug 4 "scan:continue scan:list(nicks,$lchan): [get:val scan:list nicks,$lchan]" }
     if {![info exists scan:list(leave,$lchan)]} { set scan:list(leave,$lchan) "" } else { debug 4 "scan:continue scan:list(leave,$lchan): [get:val scan:list leave,$lchan]" }
 
-    if {[get:val chan:mode $lchan] eq "secure"} { set issecure 1 } else { set issecure 0 };        # -- get the operational chanmode
-    if {[cfg:get ipqs:onlynoident $chan] && [string match "~*" $ident]} { set ipqs 1 } else { set ipqs 0 }; # -- only do IPQS for clients with ~ in ident?
+    if {[get:val chan:mode $lchan] eq "secure"} { set issecure 1 } else { set issecure 0 }; # -- get the operational chanmode
+    set ipqsonlynoident [cfg:get ipqs:onlynoident $chan]
+    if {($ipqsonlynoident && [string match "~*" $ident]) || !$ipqsonlynoident} { 
+        # -- do IPQS check if ipqs:onlyident is set and user is unidented, or if ipqs:onlyident is not set
+        set ipqs 1 
+    } elseif {$ident eq "webchat"} {
+        # -- always do IPQS check for webchat users
+        set ipqs 1
+    } else { set ipqs 0 }
     
-    debug 4 "scan:continue: integrate: $integrate -- issecure: $issecure -- ipqs: $ipqs"
+    debug 3 "scan:continue: integrate: $integrate -- issecure: $issecure -- ipqs: $ipqs"
 
     # -- IP Quality Score (www.ipqualityscore.com) -- fraud check
     if {[cfg:get ipqs $chan] && [ip:isLocal $ip] eq 0 && $ipqs} {     
@@ -13869,7 +13888,7 @@ proc userdb:pub:login {nick uhost hand chan arg} {
 proc userdb:msg:login {nick uhost hand arg} {
     if {[userdb:isLogin $nick]} {
         # -- already logged in
-        reply pub $chan "$nick: mate, you are already authenticated."
+        reply pub $nick "$nick: mate, you are already authenticated."
         return;
     }
     set user [join [lindex $arg 0]]
@@ -14671,7 +14690,7 @@ proc userdb:get:chan {user chan} {
     variable dbchans;   # -- dict to store channels
     variable dbusers;   # -- dict to store users
 
-    set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[dict get $dictData chan] eq $chan} }]]
+    set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} }]]
     if {$cid ne ""} { return $chan }; # -- use the chan given, if registered
 
     set uid [dict keys [dict filter $dbusers script {id dictData} { expr {[dict get $dictData user] eq $user} }]]
@@ -16724,21 +16743,24 @@ proc ipqs:query {ip} {
     set cfgurl [cfg:get ipqs:url *]
     set url "$cfgurl/[cfg:get ipqs:key *]/$ip"
 
-    #catch {set tok [http::geturl $url -keepalive 1]} error
     debug 3 "\002ipqs:query:\002 querying url: $url"
-    coroexec http::geturl $url -keepalive 1 -timeout 3000 -command [info coroutine]
-    set tok [yield]
+    catch {set tok [http::geturl $url -keepalive 1 -timeout 3000]} error
+    # -- TODO: for some reason, this coroutine doesn't return
+    #coroexec http::geturl $url -keepalive 1 -timeout 5000 -command [info coroutine]
+    #set tok [yield]
+    #set error ""; # -- TODO: fix generic error check
 
-    set error ""; # -- TODO: fix generic error check
-    #debug 5 "ipqs: checking for errors...(error: $error)"
-    #if {[string match -nocase "*couldn't open socket*" $error]} {
-    #    debug 0 "\002ipqs:query:\002 could not open socket to: $cfgurl"
-    #    http::cleanup $tok
-    #    return -1
-    #} 
+    debug 5 "ipqs: checking for errors...(tok: $tok -- error: $error)"
+    if {[string match -nocase "*couldn't open socket*" $error]} {
+        debug 0 "\002ipqs:query:\002 could not open socket to: $url"
+        http::cleanup $tok
+        return -1
+    } 
     
     set ncode [http::ncode $tok]
     set status [http::status $tok]
+
+    debug 0 "\002ipqs:query:\002 status: $status -- ncode: $ncode"
     
     if {$status eq "timeout"} { 
         debug 0 "\002ipqs:query:\002 connection to $cfgurl has timed out."
@@ -18376,7 +18398,7 @@ proc atopic:set {chan {topic ""}} {
         debug 0 "\002atopic:set:\002 AUTOTOPIC is on in $chan.  Setting to: \002$newtopic\002"
         if {[cfg:get chan:method $chan] in "1 2"} {
             putquick "TOPIC $chan :$newtopic"
-        } else { 
+        } else {
             putquick "PRIVMSG [cfg:get auth:serv:nick] :TOPIC $chan $newtopic"
         }   
     } else {
