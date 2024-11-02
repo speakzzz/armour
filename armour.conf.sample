@@ -6,7 +6,7 @@
 # /_/   \_\_|  |_| |_| |_|\___/ \__,_|_|   
 #                                          
 #
-# Abuse and channel management script for eggdrop bots on the IRC networks.
+# Abuse and channel management script for eggdrop bots on IRC networks.
 #
 # https://armour.bot
 #
@@ -55,7 +55,7 @@
 # ------------------------------------------------------------------------------------------------
 #
 # Code by       :  Empus @ Undernet - empus@undernet.org
-# Last modified :  2024-05-20
+# Last modified :  2024-08-31
 #
 # Please contact me should you need any assistence, but I hope most config options are explanatory.
 #
@@ -85,9 +85,7 @@ set cfg(alert:nopass) 1
 # -- debug type? (putlog|putloglev) - [putloglev]
 # putlog will log everything to partyline (very verbose!)
 # putloglev allows debug levels to be used by enabling each level (1-5) with .console +N
-#    .console +1
-#    .console +2
-#    .console +3
+#    .console +123
 #   ... etc
 set cfg(debug:type) "putloglev"
 
@@ -158,9 +156,10 @@ set cfg(randpass) 10
 # ------------------------------------------------------------------------------------------------
 
 # -- ircd type [1-2] - [1]
-# 1: ircu/Unreal (e.g., Undernet, Quakenet)
+# 1: ircu (e.g., Undernet, Quakenet)
 # 2: IRCnet/EFnet
 # 3: InspIRCd/Solanum/ircd-seven
+# 4: Unreal
 set cfg(ircd) 1
 
 # -- connected via ZNC bouncer? (0|1) - [0]
@@ -242,7 +241,7 @@ set cfg(def:wreason) "regular"
 set cfg(def:breason) "abuse"
 
 # -- auto add blacklist entries on floodnet?
-set cfg(auto:black) 1
+set cfg(auto:black) 0
 
 # -- netsplit memory timeout (mins) - [60]
 set cfg(split:mem) 60
@@ -353,7 +352,7 @@ set cfg(float:grace)  3
 # -- method to use for channel actions? (1-3) - [1]
 # 1: use server for all actions
 # 2: use X for BAN, UNBAN, and KICK, but server for everything else
-# 3: use X for everything: BAN, UNBAN, KICK, MODE, TOPIC, OP, DEOP, VOICE, DEVOICE
+# 3: use X for everything: BAN, UNBAN, KICK, MODE, TOPIC, OP, DEOP, VOICE, DEVOICE, INVITE
 set cfg(chan:method) "1"
 
 # -- authentication username
@@ -382,7 +381,7 @@ set cfg(auth:serv:nick) "X"
 
 # -- auth service host - [channels.undernet.org]
 # -- ie. /msg x@channels.undernet.org login <user> <pass>
-# leave blank if using NickServ auth mechanism
+# if using NickServ, change to black of the NickServ services host as needed
 set cfg(auth:serv:host) "channels.undernet.org"
 
 # -- extension for umode +x registered users - [users.undernet.org]
@@ -491,8 +490,8 @@ set addrbl(pbl.cymru.com) "{Cymru PBL} +1.0 0";       # -- auto scanner (and man
 set addrbl(mbl.cymru.com) "{Cymru MBL} +1.0 0";       # -- auto scanner (and manual)
 set addrbl(bbl.cymru.com) "{Cymru BBL} +1.0 0";       # -- auto scanner (and manual)
 set addrbl(rbl.ircbl.org) "IRCBL +1.0 1";             # -- only manual scans as Undernet uses network-wide
-set addrbl(rbl.undernet.org) "{Undernet} +1.0 1";     # -- only manual scans as Undernet uses network-wide
-#set addrbl(zen.spamhaus.org) "{Spamhaus Zen} +1.0 0"; # -- auto scanner (and manual); must not use public nameservers
+#set addrbl(rbl.undernet.org) "{Undernet} +1.0 1";     # -- only manual scans as Undernet uses network-wide
+#set addrbl(zen.spamhaus.org) "{Spamhaus Zen} +1.0 0"; # -- auto scanner (and manual); eggdrop box must not use public nameservers
 
 # -- enable port scanner? (0|1) [1]
 set cfg(portscan) 1
@@ -508,6 +507,7 @@ set cfg(portscan:remote) 0
 # set addport(<port>) "<description>"
 set addport(21) "ftp"
 set addport(22) "ssh"
+set addport(23) "telnet"
 set addport(25) "smtp"
 set addport(80) "www"
 set addport(7070) "realserver"
@@ -548,7 +548,12 @@ set cfg(bot:remote:whois) "remote-bot"
 set cfg(captcha) 0
 
 # -- CAPTCHA type (web|text) - [text]
+# -- note that "web" requires the armour-verify web application
 set cfg(captcha:type) "text"
+
+# -- only if cfg(captcha:type) is "web", what is the URL to the web CAPTCHA application?
+# -- note that "web" requires the armour-verify web application
+set cfg(captcha:web:url) "https://verify.armour.bot"
 
 # -- www.textcaptcha.com ID
 # -- only required if cfg(captcha:type) is "text"
@@ -560,14 +565,11 @@ set cfg(captcha:method) "notice"
 # -- send an opnotice when a question is sent to a user? (0|1) - [1]
 set cfg(captcha:opnotc) 1
 
-# -- how long to wait (in secs) for CAPTCHA responses? - [300]
+# -- how long to wait (in secs) for CAPTCHA responses? - [180]
 set cfg(captcha:time) 180
 
 # -- action to take for expired responses (manual|kick|kickban) - [kickban]
 set cfg(captcha:expired) "kickban"
-
-# -- bantime duration for expired responses - [1h]
-set cfg(captcha:expired:bantime) "1h"
 
 # -- kick message for expired responses
 set cfg(captcha:expired:kick) "Armour: your lack of CAPTCHA response is disturbing. Please try again or login to X."
@@ -588,7 +590,7 @@ set cfg(captcha:wrong:attempts) 1
 # -- manual: send opnotice to ask ops for manual review
 set cfg(captcha:wrong) "kickban"
 
-# -- bantime duration for expired responses? - [10m]
+# -- bantime duration for incorrect responses? - [10m]
 set cfg(captcha:wrong:bantime) "10m"
 
 # -- bantime duration for expired responses - [1h]
@@ -962,6 +964,21 @@ set cfg(dronebl:type) 17
 #        5: only authed users with command access
 set cfg(quote:allow) 2
 
+# -- level required to delete quotes that are not your own - [200]
+set cfg(quote:cmd:del) 200
+
+# -- level required to recall quote stats - [200]
+set cfg(quote:cmd:stats) 200
+
+# -- how long to remember last spoken lines in a channel? (mins) - 180
+set cfg(quote:lastspeak:mins) 180
+
+# -- with 'quote last', recently spoken lines in the last N seconds will be ignored (secs) - 2
+set cfg(quote:lastspeak:ts) 2
+
+# -- with 'quote guess', how long to wait before giving the answer? (secs) - 60
+set cfg(quote:guess:secs) 60
+
 
 
 # ------------------------------------------------------------------------------------------------
@@ -997,10 +1014,14 @@ set cfg(weather:key) "YOUR-KEY-HERE"
 # -- units for weather output (metric, imperial, or both) - [both]
 set cfg(weather:units) "both"
 
+# -- specify celsius temperature and windspeed with decimal precision? (0|1) - [0]
+set cfg(weather:precise) 0
+
 
 
 # ------------------------------------------------------------------------------------------------
 # NINJAS PLUGIN -- settings only relevant if optional plugin is loaded: ninjas
+# commands: joke, dad, history, fact, chuck, cocktail
 # https://www.api-ninjas.com
 # ------------------------------------------------------------------------------------------------
 
@@ -1012,14 +1033,15 @@ set cfg(weather:units) "both"
 #        5: only authed users with command access
 set cfg(ninjas:allow) 3
 
-# -- API Key (www.ninjas-api.com)
+# -- API Key (www.api-ninjas.com)
 set cfg(ninjas:key) "YOUR-KEY-HERE"
 
 
 
 # ------------------------------------------------------------------------------------------------
-# HUMOUR PLUGIN -- settings only relevant if optional plugin is loaded: seen
-# https://www.humor-api.com
+# HUMOUR PLUGIN -- settings only relevant if optional plugin is loaded: humour
+# commands: meme, gif, praise, insult
+# https://www.humorapi.com
 # ------------------------------------------------------------------------------------------------
 
 # -- who can use the commands: gif, meme, praise, insult (1-5) - [2]
@@ -1051,7 +1073,7 @@ set cfg(ask:service) "openai"
 #             https://openai.com/api/pricing
 # perplexity: https://docs.perplexity.ai/docs/model-cards
 #             https://docs.perplexity.ai/docs/pricing
-set cfg(ask:model) "gpt-4o"
+set cfg(ask:model) "gpt-4o-mini"
 
 # -- AI API token
 # OpenAI:     https://platform.openai.com/account/api-keys
@@ -1128,7 +1150,7 @@ set cfg(ask:image:model) "dall-e-3"
 
 # -- DALL-E image overlay with requesting nick and prompt? (0|1) - [1]
 # note: ImageMagick7 must be installed on machine (using binary 'convert')
-set cfg(ask:image:overlay) 1
+set cfg(ask:image:overlay) 0
 
 # -- DALL-E image creation rate limiting (req:mins:hold) - [5:5:30]
 # -- triggered at 5 requests per 5 mins, then retaining rate limit for 30 mins
@@ -1143,7 +1165,7 @@ set cfg(ask:rate:act) "dall-e-2"
 # -- absolute path to save DALL-E image PNG files to webserver
 set cfg(ask:path) "/home/armour/www/armour"
 
-# --retain PNG and mp3 files for how many days? - [90]
+# -- retain PNG and mp3 files for how many days? - [90]
 # notes:
 #   - to keep forever, use empty value
 #   - those with votes or in quotes will remain preserved
@@ -1197,7 +1219,7 @@ set cfg(speak:openai:format) "mp3"
 set cfg(speak:key) "API-KEY-HERE"
 
 # -- ElevenLabs text-to-speech voice model
-set cfg(speak:model) "eleven_monolingual_v1"
+set cfg(speak:model) "eleven_turbo_v2_5"
 
 # -- ElevenLabs text-to-speech voice
 # -- https://elevenlabs.io/app/voice-lab

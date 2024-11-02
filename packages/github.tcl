@@ -9,7 +9,7 @@
 # chicken and egg problem we need non-standard packages tls and json ...
 package require tls
 package require http
-::http::register https 443 ::tls::socket
+::http::register https 443 [list ::tls::socket -autoservername true]
 
 namespace eval ::github {
     variable libdir [file normalize [file join [file dirname [info script]] ..]]

@@ -210,6 +210,7 @@ proc arm:cmd:ask {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     lassign [db:get id,user users curnick $nick] uid user
+    if {$uid eq ""} { set uid 0; }
     set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
 
     set cid [db:get id channels chan $chan]
@@ -353,6 +354,7 @@ proc arm:cmd:and {0 1 2 3 {4 ""} {5 ""}} {
     set arg [join [join $arg]]; # -- join the arg list
 
     lassign [db:get id,user users curnick $nick] uid user
+    if {$uid eq ""} { set uid 0; }
     set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
 
     set cid [db:get id channels chan $chan]
@@ -457,13 +459,19 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
     variable dbchans
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
 
-    putlog "ask:abstract:cmd: started: $cmd -- type: $type -- nick: $nick -- chan: $chan -- arg: $arg"
+    #putlog "ask:abstract:cmd: started: $cmd -- type: $type -- nick: $nick -- chan: $chan -- arg: $arg"
+    set ai "openai"
     if {$cmd eq "image"} {
         if {![cfg:get ask:image]} { return; }; # -- DALL-E image creation disabled
         set plural "images"
-    } else { set plural $cmd }
+    } elseif {$cmd eq "sing"} { set plural "songs"; set ai "AI" } \
+    elseif {$cmd eq "summarise"} { set plural "summaries" } \
+    elseif {$cmd eq "video"} { set plural "videos"; set ai "AI" } \
+    else { set plural $cmd }
 
 	lassign [db:get user,id users curnick $nick] user uid
+    if {$user ne "Empus" && $cmd eq "video"} { return; }; # -- TODO: remove
+    if {$uid eq ""} { set uid 0; }
 	if {[string index [lindex $arg 0] 0] eq "#"} {
 		# -- channel name given
 		set chan [lindex $arg 0]
@@ -474,6 +482,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 	}
 
 	set cid [db:get id channels chan $chan]
+    if {$uid eq ""} { set uid 0; set authed 0 } else { set authed 1 }
 	set glevel [db:get level levels cid 1 uid $uid]
 	set level [db:get level levels cid $cid uid $uid]
 
@@ -485,8 +494,6 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
                         	            #        4: only opped and authed channel users
                                         #        5: only authed users with command access
     set allow 0
-    if {$uid eq ""} { set authed 0 } else { set authed 1 }
-    putlog "allowed: $allowed"
     if {$allowed eq 0} { return; } \
     elseif {$allowed eq 1} { set allow 1 } \
 	elseif {$allowed eq 2} { if {[isop $nick $chan] || [isvoice $nick $chan] || $authed} { set allow 1 } } \
@@ -494,40 +501,56 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
     elseif {$allowed eq 4} { if {[isop $nick $chan] || $authed} { set allow 1 } } \
     elseif {$allowed eq 5} { if {$authed} { set allow [userdb:isAllowed $nick $cmd $chan $type] } }
     if {[userdb:isIgnored $nick $cid]} { set allow 0 }; # -- check if user is ignored
-    putlog "allow: $allow -- nick: $nick -- chan: $chan -- cid: $cid -- authed: $authed"
     if {!$allow} { return; }; # -- client cannot use command
 
     set ison [db:get value settings setting $cmd cid $cid]
     if {$ison ne "on"} {
         # -- openai image setting not enabled on chan
-        debug 1 "\002ask:abstract:cmd\002 openai $plural not enabled on $chan. to enable, use: \002modchan $chan $cmd on\002"
-        reply $type $target "openai $plural not enabled. to enable, use: \002modchan $chan $cmd on\002"
+        debug 1 "\002ask:abstract:cmd\002 $ai $plural not enabled on $chan. to enable, use: \002modchan $chan $cmd on\002"
+        reply $type $target "$ai $plural not enabled. to enable, use: \002modchan $chan $cmd on\002"
         return;
     }
 
+    set what [lindex $arg 0]
+    # -- usage help
     if {$arg eq ""} {
-        reply $type $target "\002usage:\002 $cmd <rand|+|view|search|del|top|stats|description> \[id|num\]"
+        if {$cmd eq "sing"} {
+            # -- command usage
+            if {[info commands quote:cron] ne ""} {
+                # -- quote plugin loaded
+                reply $type $target "\002usage:\002 $cmd (about <nick>|<prompt>) \[description\]"
+            } else {
+                # -- quote plugin not loaded
+                reply $type $target "\002usage:\002 $cmd <prompt>"
+            }
+            reply $type $target "\002usage:\002 $cmd <rand|+|view|search|del|top|stats> \[id|num\]"
+            return;
+        } elseif {$cmd eq "video"} {
+              reply $type $target "\002usage:\002 $cmd \[with <link>\] <prompt>"
+              reply $type $target "\002usage:\002 $cmd <rand|+|view|search|del|top|stats> \[id|num\]"
+
+        } else {
+            reply $type $target "\002usage:\002 $cmd <rand|+|view|search|del|top|stats|description> \[id|num\]"
+        }
         return;
     }
 
     # -- check file directory path
-    if {$cmd in "image speak"} {
+    if {$cmd in "image speak sing video"} {
         set filedir [cfg:get ask:path]
         if {![file isdirectory $filedir]} {
             # -- directory doesn't exist
-            debug 0 "\002ask:abstract:cmd\002 openai file directory \002cfg(ask:path)\002 doesn't exist: $filedir"
-            reply $type $target "\002error:\002 openai file directory \002cfg(ask:path)\002 doesn't exist: $filedir"
+            debug 0 "\002ask:abstract:cmd\002 $ai file directory \002cfg(ask:path)\002 doesn't exist: $filedir"
+            reply $type $target "\002error:\002 $ai file directory \002cfg(ask:path)\002 doesn't exist: $filedir"
             return;   
 
         } elseif {![file writable $filedir]} {
             # -- directory not writable 
-            debug 0 "\002ask:abstract:cmd\002 openai file directory \002cfg(ask:path)\002 is not writable: $filedir"
-            reply $type $target "\002error:\002 openai file directory \002cfg(ask:path)\002 is not writable: $filedir"
+            debug 0 "\002ask:abstract:cmd\002 $ai file directory \002cfg(ask:path)\002 is not writable: $filedir"
+            reply $type $target "\002error:\002 $ai file directory \002cfg(ask:path)\002 is not writable: $filedir"
             return;   
         }
     }
-
-    set what [lindex $arg 0]
 
     # -- check for blacklisted strings
     if {[ask:blacklist $chan $what]} {
@@ -576,8 +599,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
             set query "SELECT id,user,timestamp,file,votes,desc FROM openai WHERE cid='$cid' AND id='$tid' AND type='$cmd'"
             set row [join [db:query $query]]
             db:close
-            lassign $row id tuser timestamp file votes
-		    set desc [join [lrange $row 5 end]]
+            lassign $row id tuser timestamp file votes desc
             if {$id eq ""} {
                 reply $type $target "\002error:\002 $cmd not found (\002id:\002 $tid)"
                 continue;
@@ -585,11 +607,19 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
             set weburl [cfg:get ask:site *]
             set weburl [string trimright $weburl "/"]
             set weburl "$weburl/$file"
-            regexp {^\<(.*)\> } $desc -> dbnick
-            set desc [lrange $desc 1 end]
+            set dbnick ""
+            if {[regexp {^\<(.*)\> } $desc -> dbnick]} {
+                set desc [lrange $desc 1 end]
+            }
             if {$tuser ne ""} { set extra1 " \002user:\002 $tuser --" } else { set extra1 " \002nick:\002 $dbnick --" }
             if {$votes ne 0} { set extra2 " -- \002votes:\002 $votes" } else { set extra2 "" }
-            reply $type $target "\002\[$cmd:\002 $id\002\]\002$extra1 \002date:\002 [clock format $timestamp -format "%Y-%m-%d"]$extra2 -- \002url:\002 $weburl -- \002prompt:\002 $desc"
+            if {$cmd eq "sing"} {
+                # -- song
+                regexp {^([^:]+): (.+)$} $desc -> title prompt
+                reply $type $target "\002\[$cmd:\002 $id\002\]\002 \002title:\002 ${title}$extra2 -- \002url:\002 $weburl --$extra1 \002date:\002 [clock format $timestamp -format "%Y-%m-%d"] -- \002prompt:\002 $prompt"
+            } else {
+                reply $type $target "\002\[$cmd:\002 $id\002\]\002$extra1 \002date:\002 [clock format $timestamp -format "%Y-%m-%d"]$extra2 -- \002url:\002 $weburl -- \002prompt:\002 $desc"
+            }
             incr i
         }
 
@@ -623,7 +653,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
         }
         # -- output the result
         if {$i > 0} {
-            if {$i eq 1} { set suffix $cmd } else { set suffix "${cmd}s" }; # -- handle plural
+            if {$i eq 1} { set suffix $cmd } else { set suffix $plural }; # -- handle plural
             reply $type $target "done. deleted \002$i\002 $suffix."
         } else {
             #reply $type $target "\002warn:\002 no entries deleted."
@@ -658,7 +688,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 		set tchan [lindex $arg 1]
 		# -- allow stats to have optional channel (incl. * for global)
 		set glob 0; set isuser 0;
-		if {[string index $tchan 0] != "#" && $tchan != "*" && $tchan != ""} { set isuser 1; set tuser $tchan }; # -- stats for a single user
+		if {[string index $tchan 0] ne "#" && $tchan ne "*" && $tchan ne ""} { set isuser 1; set tuser $tchan }; # -- stats for a single user
 		if {$tchan ne "" && $isuser eq 0} {
 			if {$tchan eq "*"} {
 				# -- global
@@ -734,7 +764,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 		# -- TODO: move timeago locally to work in standalone
 		set firstago [userdb:timeago $first]
 		set lastago [userdb:timeago $last]
-		reply $type $target "\002${cmd}s:\002 $count -- \002first:\002 $firstago ago -- \002last:\002 $lastago ago"
+		reply $type $target "\002$plural:\002 $count -- \002first:\002 $firstago ago -- \002last:\002 $lastago ago"
 		if {$top ne "" && $isuser eq 0} {
 			reply $type $target "\002top 10 authed requesters:\002 $top"
 		}
@@ -794,8 +824,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 		set results [llength $res]
 		foreach row $res {
 			incr i
-			lassign $row id tuser timestamp file votes
-			set tdesc [join [lrange $row 5 end]]
+			lassign $row id tuser timestamp file votes tdesc
 			if {($type eq "pub" && $i eq "4") || ($type eq "msg" && $i eq "6") \
 				|| ($i eq "11")} {
 					reply $type $target "too many results found ($results), please refine search."
@@ -805,10 +834,17 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
             set weburl [string trimright $weburl "/"]
             set weburl "$weburl/$file"
             regexp {^\<(.*)\> } $tdesc -> dbnick
-            set desc [lrange $tdesc 1 end]
+            set desc $tdesc
             if {$tuser ne ""} { set extra1 " \002user:\002 $tuser --" } else { set extra1 " \002nick:\002 $dbnick --" }
             if {$votes ne 0} { set extra2 " -- \002votes:\002 $votes" } else { set extra2 "" }
-            reply $type $target "\002\[$cmd:\002 $id\002\]\002$extra1 \002date:\002 [clock format $timestamp -format "%Y-%m-%d"]$extra2 -- \002url:\002 $weburl -- \002prompt:\002 $desc"
+            if {$cmd eq "sing"} {
+                # -- song
+                regexp {^([^:]+): (.+)$} $desc -> title prompt
+                reply $type $target "\002\[$cmd:\002 $id\002\]\002 \002title:\002 ${title}$extra2 -- \002url:\002 $weburl --$extra1 \002date:\002 [clock format $timestamp -format "%Y-%m-%d"] -- \002prompt:\002 $prompt"
+            } else {
+                set desc [join [lrange $tdesc 1 end]]
+                reply $type $target "\002\[$cmd:\002 $id\002\]\002$extra1 \002date:\002 [clock format $timestamp -format "%Y-%m-%d"]$extra2 -- \002url:\002 $weburl -- \002prompt:\002 $desc"
+            }
 		}
 		if {$i eq 1} {
 			reply $type $target "search complete ($i result found)."
@@ -845,11 +881,21 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
             set weburl [cfg:get ask:site *]
             set weburl [string trimright $weburl "/"]
             set weburl "$weburl/$dbfile"
+            set dbnick ""
             regexp {^\<(.*)\> } $dbdesc -> dbnick
-            set dbdesc [lrange $dbdesc 1 end]
-            if {$dbuser ne ""} { set extra1 " \002user:\002 $dbuser --" } else { set extra1 " \002nick:\002 $dbnick --" }
+            if {$dbuser ne ""} { set extra1 " \002user:\002 $dbuser --" } elseif {$dbnick ne ""} { set extra1 " \002nick:\002 $dbnick --" } else { set extra1 "" }
             if {$dbvotes ne 0} { set extra2 " -- \002votes:\002 $dbvotes" } else { set extra2 "" }
-            reply $type $target "\002\[$cmd:\002 $dbid\002\]\002$extra1 \002date:\002 [clock format $dbts -format "%Y-%m-%d"]$extra2 -- \002url:\002 $weburl -- \002prompt:\002 $dbdesc"
+
+            if {$cmd eq "sing"} {
+                # -- song
+                regexp {^([^:]+): (.+)$} $dbdesc -> title prompt
+                reply $type $target "\002\[$cmd:\002 $dbid\002\]\002 \002title:\002 ${title}$extra2 -- \002url:\002 $weburl --$extra1 \002date:\002 [clock format $dbts -format "%Y-%m-%d"] -- \002prompt:\002 $prompt"
+            } else {
+                set desc [join [lrange $dbdesc 1 end]]
+                reply $type $target "\002\[$cmd:\002 $dbid\002\]\002$extra1 \002date:\002 [clock format $dbts -format "%Y-%m-%d"]$extra2 -- \002url:\002 $weburl -- \002prompt:\002 $dbdesc"
+            }
+
+            #reply $type $target "\002\[$cmd:\002 $dbid\002\]\002$extra1 \002date:\002 [clock format $dbts -format "%Y-%m-%d"]$extra2 -- \002url:\002 $weburl -- \002prompt:\002 [join $dbdesc]"
 			incr count;
 		}
 
@@ -893,7 +939,68 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 
             # -- send the speak link
             reply $type $target "$nick: $ref (\002id:\002 $rowid)"
-        }
+
+        } elseif {$cmd eq "sing"} {
+            # -- sing
+            regsub -all {"} $query {\\"} query; # -- escape quotes
+            debug 0 "ask:abstract:cmd: sing: chan: $chan -- nick: $nick -- query: $query"
+            set iserror [sing:ask $type $chan $cid $nick $user $target $query]
+            if {[lindex $iserror 0] eq 1} { 
+                debug 0 "\002ask:abstract:cmd\002 sing error: [lrange $iserror 1 end]"
+                reply $type $target "\002error:\002 [lrange $iserror 1 end]"
+                return; 
+            }
+            # -- success! tell them the song is generating...
+            reply $type $target "$nick: please hold... \U0001F3B5"
+
+        } elseif {$cmd eq "summarise"} {
+            # -- sing
+            regsub -all {"} $query {\\"} query; # -- escape quotes
+            lassign [summarise:ask $type $chan $cid $nick $user $uid $target $query] iserror reply
+            putlog "ask:abstract:cmd: summarise:ask iserror: $iserror -- reply: $reply"
+            if {$iserror eq 1} { 
+                # -- error
+                debug 0 "\002ask:abstract:cmd\002 summarise error: $reply"
+                reply $type $target "\002error:\002 $reply"
+                return; 
+            } elseif {$iserror eq "2"} {
+                # -- halt with a custom message
+                reply $type $target $reply
+            } elseif {$iserror eq "-1"} {
+                # -- halt silently
+                return;
+            }
+            # -- success!
+            reply $type $target $reply
+
+        } elseif {$cmd eq "video"} {
+            # -- video
+            set origquery $query; set link ""
+            if {[regexp -- {^(using |from |with |use )(https?://[^\s]+.png)} $query -> verb link]} {
+                # -- image link provided
+                set ext [string trimleft [file extension $link] .]
+                if {$ext ni "png jpg jpeg"} {
+                    reply $type $target "\002error:\002 invalid image link format: $link"
+                    return;
+                }
+                set query [lrange $query 2 end]
+                if {$query eq ""} {
+                    reply $type $target "\002usage:\002 video \[from <link>\] <prompt>"
+                    return;
+                }
+                debug 0 "ask:abstract:cmd: video: using image link: $link"
+            }
+            regsub -all {"} $query {\\"} query; # -- escape quotes
+            set iserror [video:ask $type $chan $cid $nick $user $target $origquery $query $link]
+            if {[lindex $iserror 0] eq 1} { 
+                debug 0 "\002ask:abstract:cmd\002 video error: [lrange $iserror 1 end]"
+                reply $type $target "\002error:\002 [lrange $iserror 1 end]"
+                return; 
+            }
+            # -- success! tell them the video is generating...
+            reply $type $target "$nick: please hold... \U1F3AC"
+
+        } 
     }
 
     # -- create log entry for command use
@@ -1224,26 +1331,32 @@ proc ask:dalle {desc {num "1"} {size "512x512"} {image ""}} {
         }
         # -- end rate limiting
 
-        set headers [list "Authorization" "Bearer $token" "Content-Type" "application/json"]
-        #set model [cfg:get ask:image:model *]
-        set odesc $desc
-        set desc [encoding convertto utf-8 $desc]; # -- convert to utf-8
-        set query [json::dict2json [dict create prompt "\"$desc\"" n $num size "\"$size\"" model "\"$model\""]]
-        debug 5 "ask:dalle: POST json: $query"
-        catch {set tok [http::geturl $url \
-            -method POST \
-            -query $query \
-            -headers $headers \
-            -timeout $timeout \
-            -keepalive 0]} error
+        if {[info commands "py:caller"] ne ""} {
+            # -- use Python DALL-E image generation
+            py:caller "run_in_background" $desc $size
+            
+        } else {
+            # -- use TCL DALL-E image generatio
+            set headers [list "Authorization" "Bearer $token" "Content-Type" "application/json"]
+            #set model [cfg:get ask:image:model *]
+            set odesc $desc
+            set desc [encoding convertto utf-8 $desc]; # -- convert to utf-8
+            set query [json::dict2json [dict create prompt "\"$desc\"" n $num size "\"$size\"" model "\"$model\""]]
+            debug 5 "ask:dalle: POST json: $query"
+            catch {set tok [http::geturl $url \
+                -method POST \
+                -query $query \
+                -headers $headers \
+                -timeout $timeout \
+                -keepalive 0]} error
 
-        # -- connection handling abstraction
-        set iserror [ask:errors $url $tok $error]
-        if {[lindex $iserror 0] eq 1} { return $iserror; }; # -- errors
-        
-        set data [http::data $tok]
+            # -- connection handling abstraction
+            set iserror [ask:errors $url $tok $error]
+            if {[lindex $iserror 0] eq 1} { return $iserror; }; # -- errors
+            
+            set data [http::data $tok]
+        }
     }
-    #set json [json::dict2json [dict create prompt "\"$desc\"" n $num size "\"$size\"" response_format "\"b64_json\""]]
     
     debug 5 "\002OpenAI DALLE response JSON:\002 $data"
     set dict [json::json2dict $data]
@@ -1287,7 +1400,7 @@ proc ask:dalle {desc {num "1"} {size "512x512"} {image ""}} {
 }
 
 # -- add optional iamge overlay, and insert to database
-proc ask:abstract:insert {cmd nick user cid weburl query} {
+proc ask:abstract:insert {cmd nick user cid weburl query {title ""}} {
     set path [string trimright [cfg:get ask:path *] "/"]
     set file [file tail $weburl]
     if {$cmd eq "image"} {
@@ -1295,13 +1408,13 @@ proc ask:abstract:insert {cmd nick user cid weburl query} {
         if {[lindex [exec whereis convert] 1] ne "" && [cfg:get ask:image:overlay]} {
             set overlay "\\<$nick\\> $query"
             debug 3 "ask:abstract:insert: adding text overlay: $overlay"
-            #exec convert $path/$file -alpha on \( +clone -scale x8% -threshold 101% -channel A -fx "0.5" \) -gravity south -composite -fill white -pointsize 24 -annotate 0,0 '$overlay' $path/$file
-            #exec convert $path/$file -alpha on \( +clone -scale x8% -threshold 101% -channel A -fx "0.5" \) -gravity south -composite -fill white -pointsize 24 -annotate 0,0 $overlay $path/$file
-		    exec convert $path/$file \( -size 1024 -background rgba\(0,0,0,0.5\) -fill white -pointsize 24 caption:$overlay \) -gravity south -composite $path/$file
+            exec convert $path/$file \( -size 1024 -background rgba\(0,0,0,0.5\) -fill white -pointsize 24 caption:$overlay \) -gravity south -composite $path/$file
         }
     }
     # -- insert into db
-    set query "<$nick> $query"; # -- prefix with nick
+    if {$cmd eq "sing"} {
+        set query "$title: <$nick> sing $query"; # -- prefix with title and nick
+    } else { set query "<$nick> $query" }; # -- prefix with nick
     db:connect
     set desc [db:escape $query]
     set ts [clock seconds]
@@ -1319,11 +1432,8 @@ proc ask:image {request} {
     set image 0; set imagelink ""; set desc ""
     debug 4 "ask:image: request: $request"
 
-    #regexp -nocase {^(?:create|make|design|produce|gen(?:erate)?) (?:an|a)?\s?(([^\s]+)?\s?(?:image|photo|pic(?:ture)?) .+)} $request orig desc
-    #regexp -nocase {^(?:create|show|make|draw|design|produce|gen(?:erate)?) (?:me|us)?\s?(?:an|a)?\s?(([^\s]+)?\s?(?:image|photo|pic(?:ture)?) .+)} $request orig desc
-    #set regex {^(?:create|show|make|edit|change|modify|draw|(?:re)?design|produce|gen(?:erate)?) (?:me|us|this|the|a)?\s?(?:an|a)?\s?(?:new)?\s?(([^\s]+)?\s?(?:image|photo|variation|pic(?:ture)?):? .+)}
-    set regex {^(?:create|show|make|edit|change|modify|draw|(?:re)?design|produce|gen(?:erate)?) (?:me|us|this|the|a)?\s?(?:an|a)?\s?(?:new)?\s?(([^\s]+)?\s?(?:image|photo|variation|pic(?:ture)?):? (?:of||with|that|about)? (.+))}
-    regexp -nocase $regex $request orig n1 n2 desc; # -- TODO: build a better pattern!
+    set regex {^(?:create|show|make|edit|change|modify|draw|(?:re)?design|produce|gen(?:erate)?) (?:me|us|this|the|a)?\s?(?:an|a)?\s?(?:new)?\s?(?:(?:[^\s]+)?\s?(?:image|photo|variation|pic(?:ture)?):?\s(?:of||with|that|about)?\s(.+))}
+    regexp -nocase $regex $request -> desc
     
     if {$desc ne ""} { set image 1 }
     #if {$prefix ne ""} { set desc "$prefix $desc" }
@@ -1409,6 +1519,41 @@ proc jsonstr {data} {
 		}
 	}
 	return "\"$new\""
+}
+
+# -- strip special chars from string
+proc ask:strip {string} {
+    # -- formatting patterns
+    set colours {\003([0-9]{1,2}(,[0-9]{1,2})?)?}
+    set bold {\002}
+    set italics {\035}
+    set underline {\037}
+    set reset {\017}
+    set action {\001ACTION}
+
+    # -- remove colours
+    set stripped [regsub -all $colours $string ""]
+
+    # -- remove bold
+    set stripped [regsub -all $bold $stripped ""]
+
+    # -- remove italics
+    set stripped [regsub -all $italics $stripped ""]
+
+    # -- remove underline
+    set stripped [regsub -all $underline $stripped ""]
+
+    # -- remove reset
+    set stripped [regsub -all $reset $stripped ""]
+
+    # -- fix action
+    set stripped [regsub -all $action $stripped ""]
+    set stripped [regsub -all {\001} $stripped ""]
+
+    # -- escape \
+    set stripped [string map {"\\" "\\\\"} $stripped]
+
+    return $stripped
 }
 
 # -- generate a random file

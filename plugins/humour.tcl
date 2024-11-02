@@ -13,23 +13,6 @@
 namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
-# -- API configuration (noreg queries)
-set cfg(humour:key) "cd2e8c2aa0a249429d9f7354b149d542";  # -- API key
-
-set cfg(humour:allow) 3;    # -- who can use commands? (1-4)
-                            #        1: all channel users
-                            #        2: only voiced, opped, and authed users
-                            #        3: only opped and authed channel users
-                            #        4: only authed users   
-
-set addcmd(meme)    {  arm       1          pub msg dcc  }; # -- requires humour plugin
-set addcmd(gif)     {  arm       1          pub msg dcc  }; # -- requires humour plugin
-set addcmd(praise)  {  arm       1          pub msg dcc  }; # -- requires humour plugin
-set addcmd(insult)  {  arm       1          pub msg dcc  }; # -- requires humour plugin
-
-# ------------------------------------------------------------------------------------------------
-# -- binds
-
 # -- prerequisite packages
 package require json
 package require http
@@ -63,6 +46,7 @@ proc humour:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
 
     lassign [db:get id,user users curnick $nick] uid user
+    if {$uid eq ""} { set uid 0 }; 
     if {[string index [lindex $arg 0] 0] eq "#"} { set chan [lindex $arg 0] } \
     else { set chan [userdb:get:chan $user $chan] }; # -- predict chan when not given
 
@@ -113,7 +97,7 @@ proc humour:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
         set tnick [lindex $arg 0]
         set reason [lrange $arg 1 end]
         if {$tnick eq "" || $reason eq ""} {
-            reply $type $target "\002usage:\002 cmd <nick> <reason>"
+            reply $type $target "\002usage:\002 $cmd <nick> <reason>"
             return;
         }
         set list [list name $tnick reason $reason]

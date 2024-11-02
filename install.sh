@@ -28,7 +28,7 @@
 
 
 ARMOUR_VER="v5.0"
-ARMOUR_GIT="https://github.com/empus/armour"
+ARMOUR_GIT="https://github.com/empus/armour -b v5_0"
 EGGDROP_VER="1.9.5"
 EGGDROP_URL="https://ftp.eggheads.org/pub/eggdrop/source/1.9/eggdrop-1.9.5.tar.gz"
 
@@ -225,7 +225,7 @@ getPort() {
     END_PORT=42519
     if [[ " FreeBSD NetBSD OpenBSD Darwin " == *" $OS "* ]]; then
         # -- BSD or macOS
-        echo "BSD or macOS: $OS"
+        #echo "BSD or macOS: $OS"
         for ((PORT=$START_PORT; PORT<=$END_PORT; PORT++)); do
             if ! netstat -an | grep -E ".*\.$PORT .*LISTEN" >/dev/null 2>&1; then
                 break
@@ -233,7 +233,7 @@ getPort() {
         done
     else
         # -- Linux
-        echo "Linux: $OS"
+        #echo "Linux: $OS"
         for ((PORT=$START_PORT; PORT<=$END_PORT; PORT++)); do
             if ! lsof -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
                 break
@@ -830,16 +830,18 @@ ask_for_setting_value() {
     fi
 
     # -- ensure IPv4 address is really not required
-    if [[ "${setting_name}" == "vhost4"  && "${new_value}" == "" ]]; then
+    if [[ "${setting_name}" == "vhost4" ]]; then
         NOIP4=0
-        local input
-        read -p "${tty_yellow}Warning:${tty_reset} Are you sure you do ${tty_yellow}not${tty_reset} want to set an IPv4 address? Enter (${tty_green}Y${tty_reset})es or (${tty_green}N${tty_reset})o: " input </dev/tty
-        echo
-        if [ "${input}" == "n" ]; then
+        if [[ "${new_value}" == "" ]]; then
+            local input
+            read -p "${tty_yellow}Warning:${tty_reset} Are you sure you do ${tty_yellow}not${tty_reset} want to set an IPv4 address? Enter (${tty_green}Y${tty_reset})es or (${tty_green}N${tty_reset})o: " input </dev/tty
             echo
-            ask_for_setting_value "$setting_name" "$current_value"
-        else
-            NOIP4=1
+            if [ "${input}" == "n" ]; then
+                echo
+                ask_for_setting_value "$setting_name" "$current_value"
+            else
+                NOIP4=1
+            fi
         fi
     fi
 
@@ -1220,33 +1222,58 @@ check_armour_settings() {
 # -- show the final remarks
 ARMOUR_LOADED=false
 show_success() {
-    if [ ${NEW_EGGDROP} == true ]; then
-        echo "    Armour is now ready to be loaded! Start your eggdrop:"
-        echo
-        echo "        ${tty_blue}./eggdrop -m ${BOTNAME}.conf${tty_reset}"
-        echo
-        echo "    From IRC, ensure you are added to eggdrop as owner, via: ${tty_green}/msg ${BOTNAME} hello${tty_reset}"
+    if [[ ${NEW_EGGDROP} == true || ${ADD_BOT} == true ]]; then
+        # -- new eggdrop install
+
+        if [ ${EGG_STARTED} == "0" ]; then
+            # -- eggdrop not running
+            echo "    Armour is now ready to be loaded! Start your eggdrop:"
+            echo
+            echo "        ${tty_blue}./eggdrop -m ${BOTNAME}.conf${tty_reset}"
+            echo
+        else
+            # -- eggdrop running
+            echo "    Armour is now loaded and the eggdrop is running! ${tty_green}PID:${tty_reset} $PID"
+            echo
+            echo "    From IRC, ensure you are added to eggdrop as owner, via:"
+            echo
+            echo "        ${tty_green}/msg ${BOTNAME} hello${tty_reset}"
+            echo "        ${tty_green}/msg ${BOTNAME} pass <password>${tty_reset}"
+            echo
+            echo "    Partyline access with telnet will then be available via: ${tty_green}telnet $IP4ADDRESS $PORT${tty_reset}"
+            echo
+        fi
 
     elif [ ${ARMOUR_LOADED} == false ]; then
+        # -- existing eggdrop install, Armour not loaded
         echo "    Armour is now ready to be loaded!"
     fi
 
     if [ ${ARMOUR_LOADED} == false ]; then
+        # -- eggdrop new or existing, Armour not loaded
         echo
         echo "    Be sure to check your Armour config file, reviewing settings, and loading plugins if desired:"
         echo
         echo "        Armour configuration file: ${tty_blue}./armour/${BOTNAME}.conf${tty_reset}"
         echo
-        echo "    When ready, you can load Armour by adding the below line to the end of your eggdrop ${tty_green}${BOTNAME}.conf${tty_reset} file:"
-        echo
-        echo "        ${tty_blue}source ./armour/${BOTNAME}.conf${tty_reset}"
-        echo
-        echo "    Rehash the eggdrop to load Armour, and then initialise the script by creating yourself as the global level 500 admin:"
+        echo "     Then initialise the script by creating yourself as the global level 500 admin:"
         echo
     else
-        # -- Armour has already been loaded on the bot
-        echo "    You may now initialise the script by creating yourself as the global level 500 admin:"
-        echo
+        # -- Armour not loaded
+        if [ ${NEW_EGGDROP} == false ]; then
+            # -- existing eggdrop install
+            echo
+            echo "    When ready, you can load Armour by adding the below line to the end of your eggdrop ${tty_green}${BOTNAME}.conf${tty_reset} file:"
+            echo
+            echo "        ${tty_blue}source ./armour/${BOTNAME}.conf${tty_reset}"
+            echo
+            echo "    Rehash the eggdrop to load Armour, and then initialise the script by creating yourself as the global level 500 admin:"
+            echo
+        else
+            # -- new eggdrop install, Armour already been loaded
+            echo "    You may now initialise the script by creating yourself as the global level 500 admin:"
+            echo
+        fi
     fi
     if [ "${IRCU}" == "1" ]; then
         echo "        ${tty_blue}/msg ${BOTNAME} inituser <botuser> <netuser>${tty_reset}"
@@ -1263,9 +1290,7 @@ show_success() {
     echo
     echo "    When debugging issues, it is helpful to show output from the eggdrop partyline (DCC), with debug levels enabled:"
     echo
-    echo "        ${tty_blue}.console +1${tty_reset}"
-    echo "        ${tty_blue}.console +2${tty_reset}"
-    echo "        ${tty_blue}.console +3${tty_reset}"
+    echo "        ${tty_blue}.console +123${tty_reset}"
     echo
     echo "    Documentation for Armour can be viewed @ ${tty_blue}https://armour.bot${tty_reset}"
     echo
@@ -1620,19 +1645,24 @@ load_armour() {
 deploy_from_file() {
     echo
     if [ $# -lt 2 ]; then
-    echo "Usage: ./install.sh -f <file>"
+    echo "Usage: ./install.sh -f <file> [-y]"
     echo
     echo "       Deploys a new bot (eggdrop & Armour) non-interactively from an input file."
+    echo "       Add ${tty_green}-y${tty_reset} to also automatically launch the eggdrop."
     echo
     exit
     fi
     DEPLOY_FILE=$2
 
     # -- auto launch eggdrop?
-    if [[ "$3" == "-y" ]]; then
-        LAUNCH=1
-    else
+    if [ $# -lt 3 ]; then
         LAUNCH=0
+    else
+        if [[ "$3" == "-y" ]]; then
+            LAUNCH=1
+        else
+            LAUNCH=0
+        fi
     fi
 
     if [ ! -f ${DEPLOY_FILE} ]; then
@@ -1803,11 +1833,11 @@ usage() {
     echo
     echo "Armour Installer"
     echo "Usage: ./install.sh [options]"
-    echo "    -i              Install Armour (and optionally, eggdrop)"
-    echo "    -a              Add a new bot to existing Armour install"
-    echo "    -l              Load Armour on an existing eggdrop with Armour already configured (incl. rehash)"
-    echo "    -f <file>       Deploy an additional Armour bot non-interactively from a deployment file"
-    echo "    -h, --help      Display this message"
+    echo "    -i                Install Armour (and optionally, eggdrop)"
+    echo "    -a                Add a new bot to existing Armour install"
+    echo "    -l                Load Armour on an existing eggdrop with Armour already configured (incl. rehash)"
+    echo "    -f <file> [-y]    Deploy an additional Armour bot non-interactively from a deployment file, with optional auto-launch"
+    echo "    -h, --help        Display this message"
     echo
     exit "${1:-0}"
 }

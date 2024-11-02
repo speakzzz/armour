@@ -129,7 +129,11 @@ proc speak:query {what} {
     set path [string trimright $path "/"]
     if {$tts ne "openai"} { set ext "mp3" }; # -- otherwise, use the openai 'response_format' param value
     set fd [open $path/$file.$ext wb]
-    fconfigure $fd -translation binary -encoding binary
+        if {[package present Tcl] < "9.0"} {
+        fconfigure $fd -translation binary -encoding binary
+    } else {
+        chan configure $fd -encoding iso8859-1
+    }
     puts -nonewline $fd $output
     close $fd
 

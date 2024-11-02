@@ -1,0 +1,2 @@
+%B%command:%B% sing %B%level:%B% %LEVEL% %B%usage:%B% sing <rand|+|view|search|del|top|stats|description> [id|num]
+generates a song via Suno AI and outputs the media file.  can also view, delete, search, vote, and recall statistics by song ID.

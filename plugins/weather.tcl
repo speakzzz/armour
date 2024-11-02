@@ -4,6 +4,12 @@
 #
 # Weather information provided via API from https://www.openweathermap.org
 #
+# Create free API key @ https://home.openweathermap.org/api_keys
+#
+# For 3-Day Forecasts, add "Base Plan" @ https://home.openweathermap.org/subscriptions
+# Requires credit card subscription with 1000 x free API calls per day.
+# Maximum calls per day can be set to 1000 to avoid charges.
+#
 # ------------------------------------------------------------------------------------------------
 namespace eval arm {
 # ------------------------------------------------------------------------------------------------
@@ -19,6 +25,7 @@ proc arm:cmd:w {0 1 2 3 {4 ""} {5 ""}} { arm:cmd:weather $0 $1 $2 $3 $4 $5 }
 # -- cmd: weather
 proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
     variable dbchans
+    variable weatherLoop
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
 
     set cmd "weather"
@@ -78,7 +85,12 @@ proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
         set units $cfgUnits
     }
 
-    set query [http::formatQuery q $city appid [cfg:get weather:key $chan] lang en units $units]
+    # -- use precision to one decimal place? (celsius temp, wind speed)
+    if {[cfg:get weather:precise $chan]} { set decimals "%0.1f" } else { set decimals "%0.0f" }
+
+    set api_key [cfg:get weather:key $chan]
+    http::register https 443 [list ::tls::socket -autoservername true]
+    set query [http::formatQuery q $city appid $api_key lang en units $units]
 
 	if {[catch {http::geturl https://api.openweathermap.org/data/2.5/weather?$query} tok]} {
 		debug 0 "\002cmd:cmd:weather:\002 socket error: $tok"
@@ -90,32 +102,58 @@ proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
 		return;
 	}
     set ncode [http::ncode $tok]
+    if {![info exists weatherLoop]} { set weatherLoop 0 }; # -- loop counter
 	if {$ncode ne 200} {
 		set code [http::code $tok]
 		http::cleanup $tok
 		debug 0 "\002cmd:cmd:weather:\002 HTTP Error: $code"
         if {$ncode eq 404} {
-            reply $type $target "\002error:\002 city not found: $city"
+            # -- city not found
+            if {[regexp -- {^(.*)\s([A-Za-z]{2})$} $city -> loc iso] && $weatherLoop < 1} {
+                # -- try reformat to "city, country"
+                incr weatherLoop
+                switch -- $type {
+                    pub { arm:cmd:weather $0 $1 $2 $3 $4 "$loc, $iso" }
+                    msg { arm:cmd:weather $0 $1 $2 $3 "$loc, $iso" }
+                    dcc { arm:cmd:weather $0 $1 $2 "$loc, $iso" }
+                }
+            } else {
+                set city [string totitle $city]
+                reply $type $target "\002error:\002 city not found: $city"
+            }
+            
         } else {
             reply $type $target "\002error:\002 HTTP error: $code"
         }
 		return;
 	}
+    set weatherLoop 0; # -- reset loop counter
 
 	set data [http::data $tok]
     http::cleanup $tok
 	set parse [::json::json2dict $data]
 
+    set coord [dict get $parse coord]
+    set lat [dict get $coord lat]
+    set lon [dict get $coord lon]
     set sunrise [expr [join [dict get $parse sys sunrise]] + [join [dict get $parse timezone]]]
     set sunset [expr [join [dict get $parse sys sunset]] + [join [dict get $parse timezone]]]
-
 	set sunrise [clock format $sunrise -format "%H:%M" -gmt 1]
 	set sunset [clock format $sunset -format "%H:%M" -gmt 1]
     set city [join [dict get $parse name]]
 	set country [join [dict get $parse sys country]]
-    set temp [format "%.1f" [join [dict get $parse main temp]]]
+    set timezone [join [dict get $parse timezone]]
+    set current_time [expr {[clock seconds] + $timezone}]
+    set weather [join [dict get $parse weather]]
+    set weather_main [dict get $weather main]
+    set description [dict get $weather description]
+    set temp [string map {.0 ""} [format $decimals [join [dict get $parse main temp]]]]
+    set temp_max [string map {.0 ""} [format $decimals [join [dict get $parse main temp_max]]]]
+    set temp_maxF [format "%.0f" [expr ($temp_max * 9/5) + 32]]
+    set feels_like [string map {.0 ""} [format $decimals [join [dict get $parse main feels_like]]]]
+    set feels_likeF [format $decimals [expr ($feels_like * 9/5) + 32]]
 	set humidity [join [dict get $parse main humidity]]
-    set windspeed [format "%.1f" [join [dict get $parse wind speed]]]
+    set windspeed [string map {.0 ""} [format $decimals [join [dict get $parse wind speed]]]]
 	set cloudcover [join [dict get $parse clouds all]]
 	#set dt [duration [expr [unixtime] - [dict get $parse dt]]]; # -- time since last update
 	set clouds [dict get [lindex [dict get $parse weather] 0] description]
@@ -123,17 +161,88 @@ proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
     set emoji [weather:emoji $code]
 
     if {$cfgUnits eq "metric"} {
-        reply $type $target "\002weather -\002 $city, $country: $emoji\002$temp\002 °C, \002$humidity\002 % humidity, \002$windspeed\002 km/h wind,\
-            \002$cloudcover\002 % cloud cover (\002$clouds\002). Sunrise: \002$sunrise\002 / Sunset: \002$sunset\002"
+        set basicReply "\002weather -\002 $city, $country: $emoji \002$temp\002°C (\002max:\002 ${temp_max}°C), \002$humidity\002% humidity, \002$windspeed\002 km/h wind,\
+            \002feels like:\002 ${feels_like}°C, \002$cloudcover\002% cloud cover (\002$clouds\002). Sunrise: \002$sunrise\002 / Sunset: \002$sunset\002"
     } elseif {$cfgUnits eq "imperial"} {
-        reply $type $target "\002weather -\002 $city, $country: $emoji\002$temp\002 °F, \002$humidity\002 % humidity, \002$windspeed\002 mph wind,\
-            \002$cloudcover\002 % cloud cover (\002$clouds\002). Sunrise: \002$sunrise\002 / Sunset: \002$sunset\002"
+        set basicReply "\002weather -\002 $city, $country: $emoji\ 002$temp\002°F (\002max:\002 ${temp_maxF}°F), \002$humidity\002% humidity, \002$windspeed\002 mph wind,\
+            \002feels like:\002 ${feels_likeF}°F, \002$cloudcover\002% cloud cover (\002$clouds\002). Sunrise: \002$sunrise\002 / Sunset: \002$sunset\002"
     } elseif {$cfgUnits eq "both"} {
-        set tempF [format "%.1f" [expr ($temp * 9/5) + 32]]
-        set windspeedMph [format "%.1f" [expr $windspeed * 0.621371]]
-        reply $type $target "\002weather -\002 $city, $country: $emoji\002$temp\002 °C (\002$tempF\002 °F), \002$humidity\002 % humidity,\
-            \002$windspeed\002 km/h (\002$windspeedMph\002 mph) wind, \002$cloudcover\002 % cloud cover (\002$clouds\002). Sunrise: \002$sunrise\002 / Sunset: \002$sunset\002"
+        set tempF [format "%.0f" [expr ($temp * 9/5) + 32]]
+        set windspeedMph [format "%.0f" [expr $windspeed * 0.621371]]
+        set basicReply "\002weather -\002 $city, $country: $emoji \002$temp\002°C (\002$tempF\002°F), \002max:\002 ${temp_max}°C (${temp_maxF}°F), \002$humidity\002% humidity,\
+            \002$windspeed\002 km/h (\002$windspeedMph\002 mph) wind, \002feels like:\002 ${feels_like}°C / ${feels_likeF}°F, \002$cloudcover\002% cloud cover (\002$clouds\002). Sunrise: \002$sunrise\002 / Sunset: \002$sunset\002"
     }
+
+    # -- fetch detailed forecast
+    set url "https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&exclude=minutely,hourly&appid=${api_key}&units=${units}"
+    set response [::http::geturl $url]
+
+    if {[::http::status $response] ne "ok"} {
+        reply $type $target "\002error:\002 HTTP error: [http::ncode $response]"
+    }
+
+    set forecast_data [::http::data $response]
+    set json_forecast [::json::json2dict $forecast_data]
+
+    if {[dict exists $json_forecast cod]} {
+        # -- just send the basic reply without forecast
+        # -- account probably doesn't have billing plan for forecasts
+        reply $type $target $basicReply
+        #reply $type $target "\002error:\002 [dict get $json_forecast message]"
+        return;
+    }
+
+    set daily_forecast [dict get $json_forecast daily]
+    set forecast_msg ""
+
+    for {set i 1} {$i <= 3} {incr i} {
+        set day_forecast [lindex $daily_forecast $i]
+        set day [clock format [dict get $day_forecast dt] -format "%a" -gmt 1]
+        set day_weather [join [dict get $day_forecast weather]]
+        set day_weather_main [dict get $day_weather main]
+        set day_description [dict get $day_weather description]
+        set day_emoji [weather:emoji [dict get $day_weather id]]
+        set temp_min [string map {.0 ""} [format $decimals [dict get $day_forecast temp min]]]
+        set temp_max [string map {.0 ""} [format $decimals [dict get $day_forecast temp max]]]
+
+        if {$cfgUnits eq "metric"} {
+            append forecast_msg "$day: $day_emoji  (\002high:\002 ${temp_max}°C, \002low:\002 ${temp_min}°C) \002--\002 "
+        } elseif {$cfgUnits eq "imperial"} {
+            set temp_minF [format "%.0f" [expr ($temp_min * 9/5) + 32]]
+            set temp_maxF [format "%.0f" [expr ($temp_max * 9/5) + 32]]
+            append forecast_msg "\002$day:\002 $day_emoji (\002high:\002 ${temp_maxF}°F, \002low:\002 ${temp_minF}°F) \002--\002 "
+        } elseif {$cfgUnits eq "both"} {
+            set temp_minF [format "%.0f" [expr ($temp_min * 9/5) + 32]]
+            set temp_maxF [format "%.0f" [expr ($temp_max * 9/5) + 32]]
+            append forecast_msg "\002$day:\002 $day_emoji (\002high:\002 ${temp_max}°C / ${temp_maxF}°F, \002low:\002 ${temp_min}°C / ${temp_minF}°F) \002--\002 "
+        }
+    }
+    set forecast_msg [string trimright $forecast_msg " \002--\002 "]
+
+    if {$cfgUnits eq "metric"} {
+        set detailedReply "\002weather:\002 $city, $country: $emoji \002${temp}\002°C (\002max:\002 ${temp_max}°C), \002$humidity\002% humidity, \
+            \002$windspeed\002 km/h wind, \002feels like:\002 ${feels_like}°C, \002$cloudcover\002% cloud cover (\002$clouds\002) -- \
+            \002time:\002 [clock format $current_time -format "%H:%M" -gmt 1] -- \002sunrise:\002 $sunrise -- \
+            \002sunset:\002 $sunset -- \002forecast:\002 $forecast_msg"
+
+    } elseif {$cfgUnits eq "imperial"} {
+        set temp [format $decimals [expr ($temp * 9/5) + 32]]
+        set windspeed [format "%.0f" [expr $windspeed * 0.621371]]
+        set detailedReply "\002weather:\002 $city, $country: $emoji \002${temp}\002°F (\002max:\002 ${temp_maxF}°F), \002$humidity\002% humidity, \
+            \002$windspeed\002 mph wind, \002feels like:\002 ${feels_likeF}°F, \002$cloudcover\002% cloud cover (\002$clouds\002) -- \
+            \002time:\002 [clock format $current_time -format "%H:%M" -gmt 1] -- \002sunrise:\002 $sunrise -- \
+            \002sunset:\002 $sunset -- \002forecast:\002 $forecast_msg"
+
+    } elseif {$cfgUnits eq "both"} {
+        set tempF [format "%.0f" [expr ($temp * 9/5) + 32]]
+        set windspeedMph [format "%.0f" [expr $windspeed * 0.621371]]
+        set detailedReply "\002weather:\002 $city, $country: $emoji \002${temp}\002°C (\002${tempF}\002°F), \002max:\002 ${temp_max}°C (${temp_maxF}°F), \002$humidity\002% humidity,\
+            \002$windspeed\002 km/h (\002${windspeedMph}\002 mph) wind, \002feels like:\002 ${feels_like}°C / ${feels_likeF}°F, \002$cloudcover\002% cloud cover (\002$clouds\002) --\
+            \002time:\002 [clock format $current_time -format "%H:%M" -gmt 1] -- \002sunrise:\002 $sunrise --\
+            \002sunset:\002 $sunset -- \002forecast:\002 $forecast_msg"
+    }
+
+    reply $type $target $detailedReply; # -- send the reply
 }
 
 # -- return weather emojis by openweathermap.org code
@@ -163,12 +272,11 @@ proc weather:emoji {code} {
     # -- return the emoji
     if {[dict exists $weatherEmojis $code]} {
         set emoji [dict get $weatherEmojis $code]
-        return "$emoji  "
+        return "$emoji"
     } else {
         return ""
     }
 }
-
 
 putlog "\[A\] Armour: loaded plugin: weather"
 

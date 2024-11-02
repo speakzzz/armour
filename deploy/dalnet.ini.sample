@@ -8,7 +8,7 @@ prefix="c"
 chan:def="#armour"
 chan:report="#armour-log"
 chan:nocmd=""
-ban="chan"
+chan:method="1"
 
 network="DALnet"
 servers="irc.dal.net"
