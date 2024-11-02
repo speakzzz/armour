@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------------------------
-# armour.tcl v5.0 autobuild completed on: Fri Nov  1 20:27:36 PDT 2024
+# armour.tcl v5.0 autobuild completed on: Fri Nov  1 20:47:28 PDT 2024
 # ------------------------------------------------------------------------------------------------
 #
 #     _                                    
@@ -269,7 +269,7 @@ switch -- $os {
 # -- check Tcl
 set tclVer [package present Tcl]
 debug 0 "\[@\] Armour: checking for minimum of \002TCL 8.6\002 ..."
-if {![package vsatisfies >=8.6 $tclVer]} {
+if {[package vcompare [info patchlevel] 8.6] < 0} {
     debug 0 "\[@\] Armour: \x0304(error)\x03 minimum required version of \002Tcl 8.6\002 not found. \002Try:\002 $pkgManager tcl"
     return; 
 }
