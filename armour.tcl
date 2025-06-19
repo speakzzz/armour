@@ -111,8 +111,6 @@ proc ::arm::cfg:validate {} {
         debug 0 "\[@\] Armour: configuration validated successfully."
     }
 }
-# -- Run the validation
-arm::cfg:validate
 
 # -- override some eggdrop settings based on ircd type
 if {$cfg(ircd) eq 1} {
@@ -422,6 +420,9 @@ if {$armname eq ""} {
 
 
 debug 0 "\[@\] Armour: loaded script configuration."
+
+# -- Run the validation
+arm::cfg:validate
 
 }
 # -- end of namespace
