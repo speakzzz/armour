@@ -66,9 +66,6 @@ if {![info exists cfg]} {
          from eggdrop, \002not\002 the \002armour.tcl\002 file!"
     die "Armour: eggdrop must load the Armour *.conf file, not the armour.tcl file!"
 }
-# In the arm-01_depends.tcl section
-
-# ... (immediately after the "if {![info exists cfg]} { ... }" block)
 
 # --
 # -- Configuration Validation
