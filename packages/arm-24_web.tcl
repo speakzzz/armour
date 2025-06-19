@@ -1,54 +1,65 @@
-# Web Interface
-#
-# ------------------------------------------------------------------------------------------------
+# armour/packages/arm-24_web.tcl - A self-contained web interface for Armour
+
 namespace eval ::arm::web {
-    
-    # In ./armour/packages/arm-24_web.tcl
 
-proc ::arm::web::start_server {} {
-    if {![::arm::cfg:get web:enable]} { return }
+    # Main procedure to start the web server socket
+    proc start_server {} {
+        if {![::arm::cfg:get web:enable]} { return }
 
-    #
-    # This path now includes the nested directory to correctly find httpd.tcl
-    #
-    set httpd_package_dir "tclhttpd-3.5.1/tclhttpd3.5.1" # <-- The only change is here
-    set httpd_path [file join [file dirname [info script]] $httpd_package_dir "httpd.tcl"]
-
-    if {![file readable $httpd_path]} {
-        ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Web server script not found at expected path: $httpd_path"
-        return
-    }
-
-    # Source the main httpd script from its own directory
-    if {[catch {source $httpd_path} err]} {
-        ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Failed to load tclhttpd. Tcl error: $err"
-        return
-    }
-
-    set port [::arm::cfg:get web:port]
-    ::arm::debug 0 "\[@\] Armour: Starting web interface on port $port"
-    
-    # This is the correct command when sourcing the file directly
-    Httpd_Server $port [list ::arm::web::router]
-}
-
-    # Simple request router
-    proc router {sock suffix} {
-        # In a real implementation, you would have session/cookie based authentication here
+        set port [::arm::cfg:get web:port]
+        ::arm::debug 0 "\[@\] Armour: Starting self-contained web interface on port $port"
         
-        switch -exact -- $suffix {
-            "/" { dashboard_page $sock }
-            default { ::Httpd_ReturnData $sock "text/html" "<h2>404 Not Found</h2><p>The requested page '$suffix' was not found.</p>" "404 Not Found" }
+        # Open a server socket and set a fileevent to handle new connections
+        if {[catch {socket -server ::arm::web::accept $port} sock]} {
+            ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Could not open server socket on port $port. Is another service using it?"
+            return
         }
     }
-    
-    # Page Handler for the Dashboard
-    proc dashboard_page {sock} {
+
+    # This procedure is called when a new browser connects
+    proc accept {sock addr p} {
+        fconfigure $sock -buffering line
+        fileevent $sock readable [list ::arm::web::handle_request $sock]
+    }
+
+    # This procedure handles the actual HTTP request
+    proc handle_request {sock} {
+        # Check for end-of-file, close if the browser disconnected
+        if {[eof $sock] || [catch {gets $sock request_line}]} {
+            catch {close $sock}
+            return
+        }
+        
+        # Read and ignore the rest of the browser headers
+        while {[gets $sock line] > 0} {
+            if {$line eq ""} break
+        }
+        
+        # Simple router: We only respond to the root "/" page for now
+        if {[lindex $request_line 1] eq "/"} {
+            set html [dashboard_page]
+            puts $sock "HTTP/1.0 200 OK"
+            puts $sock "Content-Type: text/html"
+            puts $sock "Content-Length: [string length $html]"
+            puts $sock ""
+            puts $sock $html
+        } else {
+            set response "404 Not Found"
+            puts $sock "HTTP/1.0 404 Not Found"
+            puts $sock "Content-Type: text/plain"
+            puts $sock "Content-Length: [string length $response]"
+            puts $sock ""
+            puts $sock $response
+        }
+        
+        close $sock
+    }
+
+    # This procedure generates the HTML for the dashboard page
+    proc dashboard_page {} {
         set botnick $::botnick
         set uptime [::arm::userdb:timeago $::uptime]
         set mem [expr {[lindex [status mem] 1] / 1024}]
-        set user_count [dict size $::arm::dbusers]
-        set chan_count [expr {[dict size $::arm::dbchans] - 1}] ;# Subtract global channel
         
         set html "
         <!DOCTYPE html>
@@ -56,30 +67,20 @@ proc ::arm::web::start_server {} {
         <head>
             <meta charset='UTF-8'>
             <title>Armour Status: $botnick</title>
-            <style>
-                body { font-family: sans-serif; background-color: #f4f4f4; color: #333; }
-                .container { max-width: 800px; margin: 2em auto; padding: 2em; background: #fff; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-                h1 { color: #0056b3; }
-                strong { color: #555; }
-            </style>
         </head>
         <body>
-            <div class='container'>
-                <h1>Armour Status: $botnick</h1>
-                <ul>
-                    <li><strong>Uptime:</strong> $uptime</li>
-                    <li><strong>Memory Usage:</strong> ${mem}K</li>
-                    <li><strong>Registered Users:</strong> $user_count</li>
-                    <li><strong>Managed Channels:</strong> $chan_count</li>
-                </ul>
-            </div>
+            <h1>Armour Status for $botnick</h1>
+            <ul>
+                <li><strong>Uptime:</strong> $uptime</li>
+                <li><strong>Memory Usage:</strong> ${mem}K</li>
+            </ul>
         </body>
         </html>"
         
-        ::Httpd_ReturnData $sock "text/html" $html
+        return $html
     }
+
 }
 
-# Add this call to the very end of arm-23_init.tcl
-# It will start the web server after everything else has loaded.
-arm::web::start_server
+# This line calls the procedure to start the server after the file has been loaded.
+::arm::web::start_server
