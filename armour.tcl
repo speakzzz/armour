@@ -20214,9 +20214,9 @@ namespace eval ::arm::web {
     proc start_server {} {
         if {![cfg:get web:enable]} { return }
         
-        # Check for web server package
-        if {[catch {source ./armour/packages/tclhttpd.tcl} err]} {
-            debug 0 "\[@\] Armour: \x0304(error)\x03 Web interface enabled, but tclhttpd package not found in ./armour/packages/"
+        # Load the httpd package from the system's Tcllib installation
+        if {[catch {package require httpd} err]} {
+            debug 0 "\[@\] Armour: \x0304(error)\x03 Web interface enabled, but the 'httpd' package (from Tcllib) could not be loaded. Please ensure tcllib is installed correctly. Error: $err"
             return
         }
 
