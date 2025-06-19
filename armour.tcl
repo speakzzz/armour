@@ -20211,21 +20211,24 @@ loadcmds; # -- load all commands (incl. plugins)
 # ------------------------------------------------------------------------------------------------
 namespace eval ::arm::web {
     
-    proc start_server {} {
-        if {![cfg:get web:enable]} { return }
-        
-        # Load the httpd package from the system's Tcllib installation
-        if {[catch {package require httpd} err]} {
-            debug 0 "\[@\] Armour: \x0304(error)\x03 Web interface enabled, but the 'httpd' package (from Tcllib) could not be loaded. Please ensure tcllib is installed correctly. Error: $err"
-            return
-        }
-
-        set port [cfg:get web:port]
-        debug 0 "\[@\] Armour: Starting web interface on port $port"
-        
-        # Configure URL handlers
-        ::Httpd_Server $port [list ::arm::web::router]
+    proc ::arm::web::start_server {} {
+    # Use the fully qualified name '::arm::cfg:get'
+    if {![::arm::cfg:get web:enable]} { return }
+    
+    # Load the httpd package from the system's Tcllib installation
+    if {[catch {package require httpd} err]} {
+        # Use the fully qualified name '::arm::debug'
+        ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Web interface enabled, but the 'httpd' package (from Tcllib) could not be loaded. Please ensure tcllib is installed correctly. Error: $err"
+        return
     }
+
+    set port [::arm::cfg:get web:port]
+    # Use the fully qualified name '::arm::debug'
+    ::arm::debug 0 "\[@\] Armour: Starting web interface on port $port"
+    
+    # Configure URL handlers
+    Httpd_Server $port [list ::arm::web::router]
+}
 
     # Simple request router
     proc router {sock suffix} {
