@@ -100,6 +100,18 @@ set cfg(debug:type) "putloglev"
 #       4: extremely verbose
 set cfg(log:level) 1
 
+# Log format. Can be "text" for human-readable logs or "json" for
+# machine-parseable logs.
+set cfg(log:format) "text"
+
+# Enable automatic log rotation.
+set cfg(log:rotate:enable) 1
+
+# Maximum log file size in megabytes before rotation.
+set cfg(log:rotate:size_mb) 10
+
+# Number of old log files to keep.
+set cfg(log:rotate:keep) 5
 
 # ------------------------------------------------------------------------------------------------
 # UPDATE SETTINGS
