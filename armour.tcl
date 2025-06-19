@@ -8385,7 +8385,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
 
     # -- special handling for Armour settings
     set armSettings "prefix chan:def chan:report chan:nocmd chan:method ircd znc auth:user auth:pass auth:totp auth:hide auth:rand \
-        auth:wait servicehost auth:mech auth:serv:nick auth:serv:host xhost:ext register register:inchan portscan"
+        auth:wait servicehost auth:mech auth:serv:nick auth:serv:host xhost:ext register register:inchan portscan web"
     foreach setting $armSettings {
         if {$setting in $done} { continue; }; # -- don't rewrite those specified manually
         set pos [lsearch "$setting=*" $settings]
@@ -19891,6 +19891,9 @@ debug 0 "\[@\] Armour: loaded script updater."
 namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
+# -- Manually add our new web interface as a plugin to be loaded
+set addplugin(web) "./armour/packages/arm-24_web.tcl"
+
 # -- rebind for generic userdb proc
 proc init:autologin {} { userdb:init:autologin }
 
@@ -20123,18 +20126,6 @@ init:autologin
 
 
 # ------------------------------------------------------------------------------------------------
-# plugin loader -- must be done outside the arm namespace
-# ------------------------------------------------------------------------------------------------
-foreach plugin [array names arm::addplugin] {
-    lassign [array get arm::addplugin $plugin] name file
-    arm::debug 0 "Armour: loading plugin $name ... (file: $file)"
-    catch {source $file} error
-    if {$error ne ""} {
-        arm::debug 0 "\002(plugin load error)\002:$name\: $::errorInfo"
-    }
-}
-
-# ------------------------------------------------------------------------------------------------
 namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
@@ -20200,6 +20191,17 @@ if {[info commands seen:cmd:seen] eq ""} {
     if {[info exists addcmd(seen)]} { unset addcmd(seen) }
 }
 
+# ------------------------------------------------------------------------------------------------
+# plugin loader -- must be done outside the arm namespace
+# ------------------------------------------------------------------------------------------------
+foreach plugin [array names arm::addplugin] {
+    lassign [array get arm::addplugin $plugin] name file
+    arm::debug 0 "Armour: loading plugin $name ... (file: $file)"
+    catch {source $file} error
+    if {$error ne ""} {
+        arm::debug 0 "\002(plugin load error)\002:$name\: $::errorInfo"
+    }
+}
 # ------------------------------------------------------------------------------------------------
 loadcmds; # -- load all commands (incl. plugins)
 # ------------------------------------------------------------------------------------------------
