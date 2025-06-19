@@ -18600,7 +18600,7 @@ proc atopic:set {chan {topic ""}} {
 # -- cronjob to periodically check log size for rotation
 bind cron - "*/15 * * * *" arm::log:rotate_check
 
-proc ::arm::log:rotate_check {} {
+proc ::arm::log:rotate_check {minute hour day month weekday} {
     if {![cfg:get log:rotate:enable]} { return }
 
     set botname [cfg:get botname]
