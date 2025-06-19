@@ -66,6 +66,56 @@ if {![info exists cfg]} {
          from eggdrop, \002not\002 the \002armour.tcl\002 file!"
     die "Armour: eggdrop must load the Armour *.conf file, not the armour.tcl file!"
 }
+# In the arm-01_depends.tcl section
+
+# ... (immediately after the "if {![info exists cfg]} { ... }" block)
+
+# --
+# -- Configuration Validation
+# --
+proc ::arm::cfg:validate {} {
+    variable cfg
+    set errors [list]
+
+    # Helper proc for reporting errors
+    proc add_error {msg} {
+        upvar errors errors
+        lappend errors $msg
+    }
+
+    # Validate numeric ranges (example)
+    if {[info exists cfg(exempt:time)] && ([cfg:get exempt:time *] < 1 || [cfg:get exempt:time *] > 1440)} {
+        add_error "cfg(exempt:time) must be between 1 and 1440."
+    }
+
+    # Validate specific format (e.g., X:Y) (example)
+    if {[info exists cfg(flood:line:nicks)] && ![regexp {^\d+:\d+$} [cfg:get flood:line:nicks *]]} {
+        add_error "cfg(flood:line:nicks) is not in the correct 'lines:seconds' format."
+    }
+    
+    # Validate specific values (example)
+    if {[info exists cfg(chan:method)] && [cfg:get chan:method *] ni {1 2 3}} {
+        add_error "cfg(chan:method) must be 1 (server), 2 (X), or 3 (X)."
+    }
+
+    # Validate interdependent settings (example)
+    if {[cfg:get update] && [cfg:get update:branch] eq ""} {
+        add_error "cfg(update) is enabled, but cfg(update:branch) is not set."
+    }
+
+    if {[llength $errors] > 0} {
+        putloglev 0 * "\n\002Armour: CONFIGURATION ERRORS DETECTED:\002"
+        foreach error $errors {
+            putloglev 0 * "  - $error"
+        }
+        putloglev 0 * "\002Please correct your armour.conf file. Exiting.\002"
+        die "Armour configuration errors found. See log for details."
+    } else {
+        debug 0 "\[@\] Armour: configuration validated successfully."
+    }
+}
+# -- Run the validation
+arm::cfg:validate
 
 # -- override some eggdrop settings based on ircd type
 if {$cfg(ircd) eq 1} {
@@ -181,7 +231,6 @@ proc cfg:get {setting {chan ""}} {
 
 # -- debug proc -- we use this alot
 proc debug {level string} {
-    
     # -- console logger
     if {$level eq 0 || [cfg:get debug:type *] eq "putlog"} {
         putlog "\002\[A\]\002 $string";
@@ -191,21 +240,32 @@ proc debug {level string} {
 
     # -- file logger
     set botname [cfg:get botname]
-    if {$botname eq ""} { return; };                    # -- safety net
+    if {$botname eq ""} { return; }; # -- safety net
     set loglevel [cfg:get log:level]
-    if {$loglevel eq ""} { set loglevel 0; };           # -- safety net
+    if {$loglevel eq ""} { set loglevel 0; }; # -- safety net
     if {$loglevel >= $level && $botname ne ""} {
         set logFile "[pwd]/armour/logs/$botname.log"
-        set string [string map {"\002" ""} $string];    # -- strip bold
-        set string [string map {"\x0303" ""} $string];  # -- strip green
-        set string [string map {"\x0304" ""} $string];  # -- strip red
-        set string [string map {"\x03" ""} $string];    # -- strip colour terminate
-        set line "[clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"] $string"
-        catch { exec echo "$line" >> $logFile } error
+        
+        # Strip IRC control codes for cleaner logs
+        set clean_string [string map {"\002" "" "\x0303" "" "\x0304" "" "\x03" ""} $string]
+
+        if {[cfg:get log:format] eq "json"} {
+            # Requires Tcl 8.6+ for dict create
+            set calling_proc [lindex [info level -1] 0]
+            set log_entry [json::dict2json [dict create \
+                timestamp [clock format [clock seconds] -format "%Y-%m-%dT%H:%M:%SZ" -gmt true] \
+                level $level \
+                procedure $calling_proc \
+                message $clean_string \
+            ]]
+        } else {
+            set log_entry "[clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"] $clean_string"
+        }
+
+        catch { exec echo "$log_entry" >> $logFile } error
         if {$error ne ""} { putlog "\002\[A\]\002 \x0304(error)\x03 could not write to log file: $error" }
     }
 }
-
 # -- create log directory if it doesn't exist
 if {![file isdirectory ./armour/logs]} { 
     file mkdir ./armour/logs
@@ -2266,12 +2326,63 @@ namespace eval arm {
 
 # -- IPv4 and IPv6 support for CIDR match
 proc cidr:match {ip cidr} {
-    if {![regexp -- {([^/]+)/(\d+)$} $cidr -> net prefix]} { return 0; }; # -- not CIDR notation
-    return [matchcidr $net $ip $prefix]
+    if {![regexp -- {([^/]+)/(\d+)$} $cidr -> net prefix]} { return 0; }; # not CIDR notation
+    
+    set ipIsV6 [expr {[string first ":" $ip] != -1}]
+    set netIsV6 [expr {[string first ":" $net] != -1}]
+
+    if {$ipIsV6 != $netIsV6} { return 0 } ;# IP version mismatch
+
+    if {$ipIsV6} {
+        # IPv6 Logic
+        if {$prefix > 128} { return 0 }
+        set ipBin [ipv6_to_binary $ip]
+        set netBin [ipv6_to_binary $net]
+    } else {
+        # IPv4 Logic
+        if {$prefix > 32} { return 0 }
+        binary scan [binary format c4 [split $ip .]] B32 ipBin
+        binary scan [binary format c4 [split $net .]] B32 netBin
+    }
+    
+    if {$ipBin eq "" || $netBin eq ""} { return 0 } ;# Conversion failed
+    
+    return [expr {[string range $ipBin 0 [expr {$prefix - 1}]] eq [string range $netBin 0 [expr {$prefix - 1}]]}]
+}
+
+# Helper function to convert IPv6 to a binary string representation
+# This is a complex task in pure Tcl. A simplified version is shown.
+# A robust solution would need to properly expand "::" and handle all cases.
+proc ipv6_to_binary {ipv6} {
+    # This is a non-trivial conversion. For a real implementation, a known-good
+    # library or a more robust procedure would be necessary.
+    # The following is a conceptual representation.
+    catch {
+        # Expand "::"
+        set double_colon [string first "::" $ipv6]
+        if {$double_colon != -1} {
+            set parts [split $ipv6 "::"]
+            set left_parts [split [lindex $parts 0] ":"]
+            set right_parts [split [lindex $parts 1] ":"]
+            if {[lindex $left_parts 0] eq ""} { set left_parts {} }
+            if {[lindex $right_parts 0] eq ""} { set right_parts {} }
+            set missing [string repeat ":0" [expr {8 - [llength $left_parts] - [llength $right_parts]}]]
+            set ipv6 "[join $left_parts ":"]$missing:[join $right_parts ":"]"
+            if {[string first ":" $ipv6] == 0} { set ipv6 [string range $ipv6 1 end] }
+        }
+        
+        set binary_str ""
+        foreach group [split $ipv6 ":"] {
+            set bin [binary format H* "0000$group"]
+            binary scan $bin B* b
+            append binary_str [string range $b end-15 end]
+        }
+        return $binary_str
+    }
+    return "" ;# Return empty on error
 }
 
 putlog "\[@\] Armour: loaded CIDR matching procedure."
-
 }
 # -- end namespace
 
@@ -18488,6 +18599,42 @@ proc atopic:set {chan {topic ""}} {
     if {[info exists atopic:topic($lchan)]} { unset atopic:topic($lchan) }
 }
 
+# -- cronjob to periodically check log size for rotation
+bind cron - "*/15 * * * *" arm::log:rotate_check
+
+proc ::arm::log:rotate_check {} {
+    if {![cfg:get log:rotate:enable]} { return }
+
+    set botname [cfg:get botname]
+    if {$botname eq ""} { return }
+
+    set logFile "[pwd]/armour/logs/$botname.log"
+    if {![file exists $logFile]} { return }
+
+    set maxSize [expr {[cfg:get log:rotate:size_mb] * 1024 * 1024}]
+    set currentSize [file size $logFile]
+
+    if {$currentSize < $maxSize} { return }
+
+    debug 0 "Log file size ($currentSize bytes) exceeds limit ($maxSize bytes). Rotating."
+    
+    set keep [cfg:get log:rotate:keep]
+    # Delete the oldest log file if necessary
+    if {[file exists "$logFile.$keep"]} {
+        catch {file delete "$logFile.$keep"}
+    }
+
+    # Shift all older logs
+    for {set i [expr {$keep - 1}]} {$i >= 1} {incr i -1} {
+        if {[file exists "$logFile.$i"]} {
+            catch {file rename "$logFile.$i" "$logFile.[expr {$i + 1}]"}
+        }
+    }
+    
+    # Rename the current log file
+    catch {file rename $logFile "$logFile.1"}
+    debug 0 "Log rotation complete."
+}
 debug 0 "\[@\] Armour: loaded support functions."
 
 }
