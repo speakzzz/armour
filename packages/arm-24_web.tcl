@@ -3,22 +3,32 @@
 # ------------------------------------------------------------------------------------------------
 namespace eval ::arm::web {
     
-    proc ::arm::web::start_server {} {
-    # Use the fully qualified name '::arm::cfg:get'
+    # In ./armour/packages/arm-24_web.tcl
+
+proc ::arm::web::start_server {} {
     if {![::arm::cfg:get web:enable]} { return }
-    
-    # Load the httpd package from the system's Tcllib installation
-    if {[catch {package require httpd} err]} {
-        # Use the fully qualified name '::arm::debug'
-        ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Web interface enabled, but the 'httpd' package (from Tcllib) could not be loaded. Please ensure tcllib is installed correctly. Error: $err"
+
+    #
+    # This path now includes the nested directory to correctly find httpd.tcl
+    #
+    set httpd_package_dir "tclhttpd-3.5.1/tclhttpd3.5.1" # <-- The only change is here
+    set httpd_path [file join [file dirname [info script]] $httpd_package_dir "httpd.tcl"]
+
+    if {![file readable $httpd_path]} {
+        ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Web server script not found at expected path: $httpd_path"
+        return
+    }
+
+    # Source the main httpd script from its own directory
+    if {[catch {source $httpd_path} err]} {
+        ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Failed to load tclhttpd. Tcl error: $err"
         return
     }
 
     set port [::arm::cfg:get web:port]
-    # Use the fully qualified name '::arm::debug'
     ::arm::debug 0 "\[@\] Armour: Starting web interface on port $port"
     
-    # Configure URL handlers
+    # This is the correct command when sourcing the file directly
     Httpd_Server $port [list ::arm::web::router]
 }
 
