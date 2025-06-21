@@ -1,40 +1,9 @@
-# armour/packages/arm-24_web.tcl - A self-contained web interface for Armour
+# armour/packages/arm-24_web.tcl - A self-contained web interface for Armour (Final Version)
 
 namespace eval ::arm::web {
 
-    # --- HELPER PROCEDURES ---
-
-    # Helper procedure to build a full HTML page with a consistent style
-    proc build_page {title body} {
-        set botnick $::botnick
-        return "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><title>$title: $botnick</title><link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$body</main></body></html>"
-    }
-
-    # Helper procedure to generate the navigation bar
-    proc navigation {} {
-        return "<nav><a href='/'>Dashboard</a> | <a href='/lists'>Manage Lists</a></nav>"
-    }
-
-    # Helper procedure to parse URL-encoded form data (e.g., from a POST)
-    proc parse_post_data {data} {
-        set result [dict create]
-        foreach pair [split $data &] {
-            lassign [split $pair =] key value
-            # Decode URL-encoded characters
-            set value [string map {+ " " %23 # %2F / %3A : %3D = %26 &} $value]
-            dict set result $key $value
-        }
-        return $result
-    }
-
-    # Helper procedure to send a redirect response to the browser
-    proc redirect {sock url} {
-        puts $sock "HTTP/1.0 302 Found"
-        puts $sock "Location: $url"
-        puts $sock "Content-Length: 0\r\n"
-        close $sock
-    }
-
+    # This dictionary will store our active sessions: {session_id -> username}
+    variable sessions [dict create]
 
     # --- CORE SERVER PROCEDURES ---
 
@@ -43,113 +12,131 @@ namespace eval ::arm::web {
         if {![::arm::cfg:get web:enable]} { return }
         set port [::arm::cfg:get web:port]
         if {[catch {socket -server ::arm::web::accept $port} sock]} {
-            ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Could not open server socket on port $port. Is another service using it? Error: $sock"
+            ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Could not open server socket on port $port. Error: $sock"
             return
         }
-        ::arm::debug 0 "\[@\] Armour: Starting self-contained web interface on port $port"
+        ::arm::debug 0 "\[@\] Armour: Starting web interface on port $port"
     }
 
-    # This procedure is called when a new browser connects
+    # This procedure is called when a new browser connects. It now handles everything.
     proc accept {sock addr p} {
         fconfigure $sock -buffering line -translation lf
-        fileevent $sock readable [list ::arm::web::handle_request $sock]
-    }
 
-    # This procedure handles the actual HTTP request and routes it
-    proc handle_request {sock} {
         if {[eof $sock] || [catch {gets $sock request_line}]} {
             catch {close $sock}; return
         }
+
+        # --- Read Headers ---
+        set headers [dict create]
+        while {[gets $sock line] > 0 && $line ne "\r"} {
+            if {[regexp {^([^:]+): (.*)} $line -> key value]} {
+                dict set headers [string trim $key] [string trim $value]
+            }
+        }
         
         lassign $request_line method path version
-        set content_length 0
-        
-        # Read headers and find Content-Length for POST requests
-        while {[gets $sock line] > 0 && $line ne "\r"} {
-            if {[string match -nocase "Content-Length:*" $line]} {
-                set content_length [string trim [lindex $line 1]]
+
+        # --- Session Check ---
+        set user ""
+        if {[dict exists $headers Cookie]} {
+            set cookie_str [dict get $headers Cookie]
+            if {[regexp {session_id=([^; ]+)} $cookie_str -> session_id] && [dict exists $sessions $session_id]} {
+                set user [dict get $sessions $session_id]
             }
         }
-        
-        # Handle the request based on method and path
+
+        # --- Security Gate ---
+        if {$user eq "" && $path ne "/login"} {
+            puts $sock "HTTP/1.0 302 Found\r\nLocation: /login\r\n"
+            catch {close $sock}; return
+        }
+
+        # --- ROUTING ---
         if {$method eq "POST"} {
+            set content_length 0
+            if {[dict exists $headers "Content-Length"]} { set content_length [dict get $headers "Content-Length"] }
             set post_data [read $sock $content_length]
-            set form_data [parse_post_data $post_data]
-            switch -exact -- $path {
-                "/add-entry"    { add_entry_handler $sock $form_data }
-                "/delete-entry" { delete_entry_handler $sock $form_data }
-                default         { Httpd_ReturnData $sock "text/html" [build_page "Not Found" "<h2>404 Not Found</h2>"] "404 Not Found" }
+            
+            if {$path eq "/login"} {
+                process_login $sock $post_data
             }
         } elseif {$method eq "GET"} {
+            set page_html ""
             switch -exact -- $path {
-                "/"         { dashboard_page $sock }
-                "/lists"    { lists_page $sock }
-                default     { Httpd_ReturnData $sock "text/html" [build_page "Not Found" "<h2>404 Not Found</h2>"] "404 Not Found" }
+                "/"       { set page_html [dashboard_page] }
+                "/lists"  { set page_html [lists_page] }
+                "/login"  { set page_html [login_page] }
+                "/logout" { logout_handler $sock; return }
+                default   { set page_html "<h2>404 Not Found</h2>" }
             }
-        } else {
-            close $sock
+            puts $sock "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: [string length $page_html]\r\n\r\n$page_html"
         }
+        
+        flush $sock
+        catch {close $sock}
     }
 
-
-    # --- PAGE HANDLERS (GET REQUESTS) ---
-
-    proc dashboard_page {sock} {
-        set uptime [::arm::userdb:timeago $::uptime]
-        set mem [expr {[lindex [status mem] 1] / 1024}]
-        set body "<h1>Armour Status</h1>[navigation]<p>This page provides a real-time overview of the bot's status.</p><ul><li><strong>Uptime:</strong> $uptime</li><li><strong>Memory Usage:</strong> ${mem}K</li></ul>"
-        Httpd_ReturnData $sock "text/html" [build_page "Dashboard" $body]
-    }
-
-    proc lists_page {sock} {
-        set body "<h1>Manage Lists</h1>[navigation]<h2>Whitelist</h2><table><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
-        foreach id [lsort -integer [dict keys $::arm::entries]] {
-            dict with ::arm::entries $id {
-                if {$type eq "white"} {
-                    append body "<tr><td>$id</td><td>$chan</td><td>$method</td><td>$value</td><td>[::arm::list:action $id]</td><td>$reason</td><td><form method='POST' action='/delete-entry' style='margin:0;'><input type='hidden' name='id' value='$id'><button type='submit'>Delete</button></form></td></tr>\n"
-                }
-            }
-        }
-        append body "</tbody></table><h2>Blacklist</h2><table><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
-        foreach id [lsort -integer [dict keys $::arm::entries]] {
-            dict with ::arm::entries $id {
-                if {$type eq "black"} {
-                    append body "<tr><td>$id</td><td>$chan</td><td>$method</td><td>$value</td><td>[::arm::list:action $id]</td><td>$reason</td><td><form method='POST' action='/delete-entry' style='margin:0;'><input type='hidden' name='id' value='$id'><button type='submit'>Delete</button></form></td></tr>\n"
-                }
-            }
-        }
-        append body "</tbody></table><hr><h2>Add New Entry</h2><form method='POST' action='/add-entry'><div class='grid'><label>List Type <select name='list' required><option value='B'>Blacklist</option><option value='W'>Whitelist</option></select></label><label>Channel <input type='text' name='chan' value='*' required></label></div><div class='grid'><label>Method <select name='method' required><option value='host'>host</option><option value='user'>user</option><option value='chan'>chan</option><option value='text'>text</option></select></label><label>Action <select name='action' required><option value='B'>Ban/Kick</option><option value='A'>Accept</option><option value='V'>Voice</option><option value='O'>Op</option></select></label></div><label>Value</label><input type='text' name='value' required><label>Reason / Reply</label><input type='text' name='reason' required><button type='submit'>Add Entry</button></form>"
-        Httpd_ReturnData $sock "text/html" [build_page "Manage Lists" $body]
-    }
+    # --- PAGE AND ACTION HANDLERS ---
     
-    # Helper to send HTML response
-    proc Httpd_ReturnData {sock type data {status "200 OK"}} {
-        puts $sock "HTTP/1.0 $status"
-        puts $sock "Content-Type: $type"
-        puts $sock "Content-Length: [string length $data]\r\n"
-        puts $sock $data
+    proc process_login {sock post_data} {
+        variable sessions
+        set form_data [dict create]
+        foreach pair [split $post_data &] {
+            lassign [split $pair =] key value
+            dict set form_data $key [string map {+ " "} $value]
+        }
+
+        set username [dict get $form_data username]
+        set password [dict get $form_data password]
+        set authenticated 0
+        
+        foreach {uid udata} $::arm::dbusers {
+            if {[string equal -nocase [dict get $udata user] $username]} {
+                if {[dict get $udata pass] eq [::arm::userdb:encrypt $password]} {
+                    set authenticated 1
+                }
+                break
+            }
+        }
+
+        if {$authenticated && [::arm::userdb:get:level $username *] >= [::arm::cfg:get web:level]} {
+            set session_id [::sha1::sha1 -hex "[clock clicks][rand]"]
+            dict set sessions $session_id $username
+            puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=$session_id; Path=/; HttpOnly\r\nLocation: /\r\n"
+        } else {
+            set page_html [login_page "Invalid credentials or access level."]
+            puts $sock "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: [string length $page_html]\r\n\r\n$page_html"
+        }
     }
 
-
-    # --- FORM HANDLERS (POST REQUESTS) ---
-
-    proc delete_entry_handler {sock form_data} {
-        set id [dict get $form_data id]
-        if {$id ne ""} { ::arm::db:rem $id }
-        redirect $sock /lists
+    proc logout_handler {sock} {
+        puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=deleted; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT\r\nLocation: /login\r\n"
     }
 
-    proc add_entry_handler {sock form_data} {
-        set list   [dict get $form_data list]
-        set chan   [dict get $form_data chan]
-        set method [dict get $form_data method]
-        set value  [dict get $form_data value]
-        set action [dict get $form_data action]
-        set reason [dict get $form_data reason]
-        ::arm::db:add $list $chan $method $value "WebApp" $action "1:1:1" $reason
-        redirect $sock /lists
+    proc login_page {{error ""}} {
+        if {$error ne ""} { set error "<p style='color:red;'>$error</p>" }
+        set body "<h1>Armour Login</h1>$error<form method='POST' action='/login'><label>Username</label><input type='text' name='username' required><label>Password</label><input type='password' name='password' required><button type='submit'>Login</button></form>"
+        return "<!DOCTYPE html><html><head><title>Login</title><link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$body</main></body></html>"
+    }
+
+    proc dashboard_page {} {
+        set body "<h1>Armour Status</h1><nav><a href='/'>Dashboard</a> | <a href='/lists'>View Lists</a> | <a href='/logout'>Logout</a></nav><p>Uptime: [::arm::userdb:timeago $::uptime] | Memory: [expr {[lindex [status mem] 1] / 1024}]K</p>"
+        return "<!DOCTYPE html><html><head><title>Dashboard</title><link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$body</main></body></html>"
+    }
+
+    proc lists_page {} {
+        set body "<h1>Manage Lists</h1><nav><a href='/'>Dashboard</a> | <a href='/lists'>View Lists</a> | <a href='/logout'>Logout</a></nav><h2>Whitelist</h2><table><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th></tr></thead><tbody>"
+        foreach id [lsort -integer [dict keys $::arm::entries]] {
+            dict with ::arm::entries $id { if {$type eq "white"} { append body "<tr><td>$id</td><td>$chan</td><td>$method</td><td>$value</td><td>[::arm::list:action $id]</td><td>$reason</td></tr>\n" } }
+        }
+        append body "</tbody></table><h2>Blacklist</h2><table><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th></tr></thead><tbody>"
+        foreach id [lsort -integer [dict keys $::arm::entries]] {
+            dict with ::arm::entries $id { if {$type eq "black"} { append body "<tr><td>$id</td><td>$chan</td><td>$method</td><td>$value</td><td>[::arm::list:action $id]</td><td>$reason</td></tr>\n" } }
+        }
+        append body "</tbody></table>"
+        return "<!DOCTYPE html><html><head><title>Lists</title><link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$body</main></body></html>"
     }
 }
 
-# This line calls the procedure to start the server after this file has been loaded.
+# This line calls the procedure to start the server.
 ::arm::web::start_server
