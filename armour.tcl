@@ -329,7 +329,7 @@ if {[package vcompare [info patchlevel] 8.6] < 0} {
     return; 
 }
 
-set packages "sqlite3 dns http tls json sha1 sha256"; # -- required packages
+set packages "sqlite3 dns http tls json sha1 sha256 md5"; # -- required packages
 if {[cfg:get captcha] eq 1 && [cfg:get captcha:type] eq "text"} { lappend packages "md5" }; # -- only if CAPTCHA on and web captcha not on
 
 foreach pkg $packages {
