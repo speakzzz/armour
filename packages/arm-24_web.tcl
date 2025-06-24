@@ -20,6 +20,7 @@ namespace eval ::arm::web {
 
     # This procedure is called when a new browser connects. It now handles everything.
     proc accept {sock addr p} {
+        variable sessions
         fconfigure $sock -buffering line -translation lf
 
         if {[eof $sock] || [catch {gets $sock request_line}]} {
@@ -100,7 +101,7 @@ namespace eval ::arm::web {
         }
 
         if {$authenticated && [::arm::userdb:get:level $username *] >= [::arm::cfg:get web:level]} {
-            set session_id [::sha1::sha1 -hex "[clock clicks][rand]"]
+            set session_id [::sha1::sha1 -hex "[clock clicks][clock seconds][expr {rand()}]"]
             dict set sessions $session_id $username
             puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=$session_id; Path=/; HttpOnly\r\nLocation: /\r\n"
         } else {
@@ -120,7 +121,7 @@ namespace eval ::arm::web {
     }
 
     proc dashboard_page {} {
-        set body "<h1>Armour Status</h1><nav><a href='/'>Dashboard</a> | <a href='/lists'>View Lists</a> | <a href='/logout'>Logout</a></nav><p>Uptime: [::arm::userdb:timeago $::uptime] | Memory: [expr {[lindex [status mem] 1] / 1024}]K</p>"
+        set body "<h1>Armour Status</h1><nav><a href='/'>Dashboard</a> | <a href='/lists'>View Lists</a> | <a href='/logout'>Logout</a></nav><p>Uptime: [::arm::userdb:timeago $::uptime]</p>"
         return "<!DOCTYPE html><html><head><title>Dashboard</title><link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$body</main></body></html>"
     }
 
