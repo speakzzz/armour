@@ -6625,7 +6625,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     set globlevel [db:get level levels cid 1 uid $uid]
     if {$globlevel eq ""} { set globlevel 0 }
 
-    set candronebl 0; set canircbl 0; set xtra1 ""
+    set candronebl 0; set canircbl 0; set xtra1 ""; set canrbl 0;
     if {[info command ::dronebl::submit] ne "" && [userdb:get:level $user $chan] >= [cfg:get dronebl:lvl $chan]} {
         set candronebl 1; set canrbl 1; append xtra1 "|dronebl"; set xtra2 " \[reason|comment\]"
     } else { set xtra2 " \[reason\]" }
