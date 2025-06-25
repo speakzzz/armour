@@ -39,7 +39,7 @@
 namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
-# -- require minimum of eggdrop 1.8.4
+# -- require minimum of eggdrop 1.8.4 or more
 if {[package vcompare [lindex $::version 0] "1.8.4"] < 0} {
     debug 0 "\[@\] Armour: \x0304(error)\x03 Armour requires a minimum of \002eggdrop 1.8.4\002. \002Exiting\002."
     die "Armour requires a minimum of \002eggdrop 1.8.4\002...."
