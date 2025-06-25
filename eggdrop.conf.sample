@@ -43,14 +43,11 @@ set realname "Armour -- https://armour.bot"
 # -- UTC time offset
 set offset "+5"
 
-# -- listen address for bot & user telnet sessions
-set listen-addr "127.0.0.1"
-
 # -- bot bind address for outgoing connection
-set vhost4 "172.16.164.1"
+set vhost4 ""
 
 # -- bot IPv6 bind address for outgoing connections
-#set vhost6 "2001:db5::c005:b07"
+set vhost6 ""
 
 # -- listen port for bot & user telnet sessions
 listen 1231 all
@@ -258,8 +255,6 @@ source scripts/userinfo.tcl
 loadhelp userinfo.help
 #source scripts/compat.tcl
 
-if {![file isdirectory "./db"]} { exec mkdir "./db" }
-
 if {[info exists net-type]} {
   switch -- ${net-type} {
     "EFnet" {
@@ -273,5 +268,8 @@ if {[info exists net-type]} {
   }
 }
 
-#source armour/$uservar.conf
+# -- Armour
+if {![file isdirectory "./db"]} { exec mkdir "./db" }
+bind msgm -|- "pass *" ::arm::userdb:msg:pass
+source armour/$uservar.conf
 

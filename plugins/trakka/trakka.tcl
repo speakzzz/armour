@@ -604,7 +604,7 @@ proc trakka:save {} {
         if {$type eq "xuser" && $value eq 0} { continue; }; # -- safety net
         set lchan [string tolower $chan]
         set cid [dict keys [dict filter $dbchans script {id dictData} {
-            expr {[dict get $dictData chan] eq $lchan}
+            expr {[string tolower [dict get $dictData chan]] eq $lchan}
         }]]
 
         if {$cid eq ""} {

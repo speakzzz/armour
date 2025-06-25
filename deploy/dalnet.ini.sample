@@ -1,5 +1,5 @@
-botname="mybot"
-altnick="mybot-"
+botname="dalBot"
+altnick="dalBot-"
 realname="Armour -- https://armour.bot"
 owner="Empus"
 admin="Empus <empus@undernet.org>"
@@ -8,17 +8,18 @@ prefix="c"
 chan:def="#armour"
 chan:report="#armour-log"
 chan:nocmd=""
-ban="chan"
+chan:method="1"
 
-network="Undernet"
-servers="irc.undernet.org"
-net-type="Undernet"
-ircd=1
+network="DALnet"
+servers="irc.dal.net"
+net-type="DALnet"
+ircd=2
 znc=0
 
 offset="+5"
-listen-addr="127.0.0.1"
-vhost4="127.0.0.1"
+vhost4=""
+vhost6=""
+listenport=""
 
 auth:user=""
 auth:pass=""
@@ -27,15 +28,15 @@ auth:hide=1
 auth:rand=0
 auth:wait=0
 
-servicehost="undernet.org"
-auth:mech="gnuworld"
-auth:serv:nick="X"
-auth:serv:host="channels.undernet.org"
-xhost:ext="users.undernet.org"
+servicehost="dal.net"
+auth:mech="nickserv"
+auth:serv:nick="NickServ"
+auth:serv:host="services.dal.net"
+xhost:ext=""
 
 register=1
 register:inchan=""
-portscan=1
+portscan=0
 
 oidentd=1
 username=""

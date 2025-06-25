@@ -1,0 +1,2 @@
+%B%command:%B% summarise -- %B%level:%B% %LEVEL% -- %B%usage:%B% summarise ?chan? [nick|mins|search] [prompt]
+speak a summary of a nickname from 10 random quotes about them, 10 random quotes matching a wildcard search mask, or the recent N minutes of alltools channel chatter.  defaults to humourous and sarcastic summary, with optional override prompt.

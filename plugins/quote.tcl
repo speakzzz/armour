@@ -4,12 +4,13 @@
 # 2020-07-19: upgraded for Armour v4.0
 # 2021-08-04: added '+' and 'top' command options
 #
+# quote
 # quote add <quote>
 # quote add last <nick> [lines]
 # quote add last <nick1,nick2,nickN..> [lines] [ignore]
 # quote + <id>
-# quote
-# quote rand
+# quote rand [search]
+# quote guess [search]
 # quote view <id>
 # quote delete <id>
 # quote stats [chan]
@@ -19,7 +20,6 @@
 # TODO:
 #		- adding optional cron behaviour for regular channel random quotes
 #		- implement timeago locally (to work in standalone)
-#		- configurable option to allow opped or voiced users to view and add quotes
 #
 # ------------------------------------------------------------------------------------------------
 namespace eval arm {
@@ -34,10 +34,10 @@ set quote(chan) "#channel"
 set quote(debug) 3
 
 # -- how long to remember last spoken lines in a channel? (mins) - 180
-set cfg(lastspeak:mins) 180
+set quote(lastspeak:mins) 180
 
 # -- recently spoken lines in the last N seconds should be avoided (secs) - 2
-set cfg(lastspeak:ts) 2
+set quote(lastspeak:ts) 2
 
 # -- cronjob to output random quote to channels (on the hour, every hour)
 bind cron - {0 * * * *} arm::quote:cron 
@@ -55,11 +55,12 @@ set quote(mode) 2
 set addcmd(quote)	{	quote		0			pub msg dcc	}
 set addcmd(q)		{	quote		0			pub msg dcc	}; # -- command shortcut
 
-# -- level to delete quotes
+# -- level to delete quotes & recall stats
 # -- only users added to bot can delete quotes
 # -- only users meeting the quote command level can delete their own quotes
 # -- only users with the below level or higher can delete quotes by others
-set quote(cmd:del) 100
+set quote(cmd:del) 200
+set quote(cmd:stats) 200
 
 
 # ---- binds
@@ -75,7 +76,7 @@ if {$quote(mode) eq 1} {
 		catch { unbind pub - .quote quote:bind:pub:quote }
 	}
 	# -- load commands
-	loadcmds
+	#loadcmds
 }
 
 
@@ -87,52 +88,85 @@ bind ctcp - "ACTION" { arm::coroexec arm::quote:action };
 proc quote:cmd:q {0 1 2 3 {4 ""}  {5 ""}} { coroexec quote:cmd:quote $0 $1 $2 $3 $4 $5 }
 
 # -- the main command
-proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
+proc quote:cmd:quote {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
 	variable quote
 	variable lastspeak; # -- tracks the last line a nick spoke in a chan (by 'chan,nick')
+	variable dbchans
+	variable lastspeak_ts
 	lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
     set cmd "quote"
-		
-	# -- check for integration mode
-	if {$quote(mode) eq 2} {
-		# -- ensure user has required access for command
-		if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-		lassign [db:get user,id users curnick $nick] user uid
-		if {$type ne "chan"} { set chan [userdb:get:chan $user $chan]}; # -- find a logical chan
-		set cid [db:get id channels chan $chan]
-		set level [db:get level levels cid $cid uid $uid]
+				
+	lassign [db:get user,id users curnick $nick] user uid
+	if {$uid eq ""} { set uid 0 }
+	if {[string index [lindex $arg 0] 0] eq "#"} {
+		# -- channel name given
+		set chan [lindex $arg 0]
+		set arg [lrange $arg 1 end]
 	} else {
-	  	# -- no Armour, no access level
-		set level 0
-		set cid 1;
-		if {![isop $nick $chan] && ![isvoice $nick $chan]} { return; }
+		# -- chan name not given, figure it out
+		set chan [userdb:get:chan $user $chan]
 	}
-	
-	if {![quote:isEnabled $chan]} { return; }; # -- only continue if setting is on
-
-	set glevel [db:get level levels cid 1 uid $uid]
-
-	# -- end default proc template
-		
 	set what [string tolower [lindex $arg 0]]
 	set tquote [join [lrange $arg 1 end]]
+	if {![quote:isEnabled $chan]} { return; }; # -- only continue if setting is on
+	set cid [db:get id channels chan $chan]
+	set glevel [db:get level levels cid 1 uid $uid]
+	set level [db:get level levels cid $cid uid $uid]
+
+    # -- ensure user has required access for command
+	set allowed [cfg:get quote:allow];  # -- who can use commands? (1-5)
+                                        #        1: all channel users
+									    #        2: only voiced, opped, and authed users
+                                        #        3: only voiced when not secure mode, opped, and authed users
+                        	            #        4: only opped and authed channel users
+                                        #        5: only authed users with command access
+    set allow 0
+    if {$uid eq ""} { set authed 0 } else { set authed 1 }
+    if {$allowed eq 0} { return; } \
+    elseif {$allowed eq 1} { set allow 1 } \
+	elseif {$allowed eq 2} { if {[isop $nick $chan] || [isvoice $nick $chan] || $authed} { set allow 1 } } \
+    elseif {$allowed eq 3} { if {[isop $nick $chan] || ([isvoice $nick $chan] && [dict get $dbchans $cid mode] ne "secure") || $authed} { set allow 1 } } \
+    elseif {$allowed eq 4} { if {[isop $nick $chan] || $authed} { set allow 1 } } \
+    elseif {$allowed eq 5} { if {$authed} { set allow [userdb:isAllowed $nick $cmd $chan $type] } }
+    if {[userdb:isIgnored $nick $cid]} { set allow 0 }; # -- check if user is ignored
+	if {!$allow} { return; }; # -- client cannot use command
+
+	# -- set special command level requirements
+	if {$quote(mode) eq 2} {
+		# -- integrated
+		set cmddel [cfg:get quote:cmd:del]
+		set cmdstats [cfg:get quote:cmd:stats]
+	} else {
+		# -- standalone
+		set cmddel $quote(cmd:del)
+		set cmdstats $quote(cmd:stats)
+	}
 
 	set done 0; set uselast 0;
 
 	# -- view random quote
+	# -- rand [search]
 	if {$what eq "" || $what eq "rand" || $what eq "random" || $what eq "r"} {
 		# -- show random quote
 		quote:debug 2 "quote:cmd:quote: random"
+		# -- wrap the search in * for wildcard as a quote will never be one word
+		set search $tquote
+		if {[string index $search 0] ne "*"} { set search "*$search" }
+		set length [string length $search]
+		if {[string index $search [expr $length - 1]] ne "*"} { set search "$search*" }
+		regsub -all {\*} $search {%} search
+		regsub -all {\?} $search {_} search
+		set search [quote:db:escape $search]
 		quote:db:connect
-		set query "SELECT id,nick,uhost,user,timestamp,quote FROM quotes WHERE cid='$cid' ORDER BY random() LIMIT 1"
+		set query "SELECT id,nick,uhost,user,timestamp,quote FROM quotes WHERE cid='$cid' AND lower(quote) LIKE '[string tolower $search]' ORDER BY random() LIMIT 1"
 		set row [join [quote:db:query $query]]
 		quote:db:close
 		lassign $row id tnick tuhost tuser timestamp
 		set tquote [join [lrange $row 5 end]]
 		if {$row eq ""} {
 			# -- empty db
-			quote:reply $type $target "quote db empty."
+			quote:reply $type $target "no quote found."
 			return;
 		}
 		set lines [split [join $tquote] \n]
@@ -141,21 +175,66 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 			quote:reply $type $target "\002\[id:\002 $id\002\]\002 [join $line]"
 		}
 		set done 1;
+	} elseif {$what eq "guess" || $what eq "g"} {
+		# -- show random quote without the author
+		quote:debug 2 "quote:cmd:quote: guess"
+		# -- wrap the search in * for wildcard as a quote will never be one word
+		set search $tquote
+		if {[string index $search 0] ne "*"} { set search "*$search" }
+		set length [string length $search]
+		if {[string index $search [expr $length - 1]] ne "*"} { set search "$search*" }
+		regsub -all {\*} $search {%} search
+		regsub -all {\?} $search {_} search
+		set search [quote:db:escape $search]
+		quote:db:connect
+		set pattern {(<[<@+]*[^<@+ ]+[> ]*|[@+]*[^\s]+\s\|)}; # -- nickname prefix in quote
+		set match 0
+		while {$match eq 0} {
+			set query "SELECT id,nick,uhost,user,timestamp,quote FROM quotes WHERE cid='$cid' AND lower(quote) LIKE '[string tolower $search]' ORDER BY random() LIMIT 1"
+			set row [join [quote:db:query $query]]
+			if {$row eq ""} {
+				quote:reply $type $target "no quote found."
+				quote:db:close
+				return;
+			}
+			lassign $row id tnick tuhost tuser timestamp
+			set tquote [join [lrange $row 5 end]]
+			#debug 0 "quote:cmd:quote: guess: quote $tquote"
+			#debug 0 "quote:cmd:quote: guess: match: [regexp -all $pattern $tquote]"
+			if {[regexp -all $pattern $tquote] eq 1} {
+				set match 1; break
+			} else {
+				#quote:debug 0 "quote:cmd:quote: guess: too mamy nicks: $tquote"
+			}
+		}
+		set lines [split [join $tquote] \n]
+		set lcount [llength $lines]
+		foreach line $lines {
+			#debug 0 "quote:cmd:quote: guess: $line"
+			#regsub -all {<?[@\+]?[^>]+>? \|?} $line {} line
+			regsub {^[<@+]*[^<@+ ]+[> |]*} $line "" line; # -- deal with normal nick messages
+			regsub {^\* \| [^\s]+} $line "/me" line;      # -- deal with ACTIONS (/me)
+			quote:reply $type $target "\002\[id:\002 $id\002\]\002 [join $line]"
+		}
+		utimer [cfg:get quote:guess:secs] "arm::quote:reply $type $target \"$tquote\""
+		set done 1;
+	
 	} elseif {$what eq "view" || $what eq "v"} {
 		# -- view specific quote
 		set id [lindex $arg 1]
-		quote:debug 2 "quote:cmd:quote: view $id"
+		debug 2 "quote:cmd:quote: view $id"
 		if {$id eq "" || ![regexp -- {^\d+$} $id]} {
 			quote:reply $stype $starget "usage: quote view <id> \[-more\]"
 			return;
 		}
+
 		quote:db:connect
-		set query "SELECT id,nick,uhost,user,timestamp,quote FROM quotes \
+		set query "SELECT id,nick,uhost,user,timestamp,score,quote FROM quotes \
 			WHERE id='$id' AND cid='$cid'"
 		set row [join [quote:db:query $query]]
 		quote:db:close
-		lassign $row id tnick tuhost tuser timestamp
-		set tquote [join [lrange $row 5 end]]
+		lassign $row id tnick tuhost tuser timestamp votes
+		set tquote [join [lrange $row 6 end]]
 		if {$id eq ""} {
 			# -- no such quote
 			quote:reply $type $target "no such quote."
@@ -164,24 +243,33 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		if {[lindex $arg 2] eq "-more"} { set more 1 } else { set more 0 }
 		# -- TODO: put the timeago script locally, for standalone mode
 		set added [userdb:timeago $timestamp]
-		#putlog "\002quote:\002 tquote: $tquote"
 		set lines [split [join $tquote] \n]
 		foreach line $lines {
-			quote:reply $type $target "\002\[id:\002 $id\002\]\002 [join $line]"
+			if {[regexp -- {^<([^>]+)> \001ACTION} $line -> tnick]} {
+				# -- fix action
+				set line "* $tnick [lrange $line 2 end]"
+			}
+			quote:reply $type $target [join $line]
 		}
 		set done 1
 		if {$tuser eq ""} {
 			# -- user not authed
 			if {$more} { 
 				if {$tuhost ne "user@host"} {
-					quote:reply $type $target "\002\[nick:\002 $tnick -- \002uhost:\002 $tuhost -- \002added:\002 $added\002\]\002"
+					set string "\002\[nick:\002 $tnick -- \002uhost:\002 $tuhost -- \002added:\002 $added"
 				} else {
-					quote:reply $type $target "\002\[nick:\002 $tnick -- \002added:\002 $added\002\]\002"
+					set string "\002\[nick:\002 $tnick -- \002added:\002 $added"
 				}
+				if {$votes > 0} { append string " -- \002votes:\002 $votes" }
+				quote:reply $type $target "$string\002\]\002"
 			}			
 		} else {
 			# -- user was authed
-			if {$more} { quote:reply $type $target "\002\[user:\002 $tuser -- \002bywho:\002 $tnick!$tuhost -- \002added:\002 $added\002\]\002" }
+			if {$more} {
+				set string "\002\[user:\002 $tuser -- \002bywho:\002 $tnick!$tuhost -- \002added:\002 $added"
+				if {$votes > 0} { append string " -- \002votes:\002 $votes" }
+				quote:reply $type $target "$string\002\]\002"
+			}
 		}
 		
 	# -- search quotes
@@ -266,8 +354,9 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 			}
 		}
 		# -- check chan and global level
-		if {$level < $quote(cmd:del) && $glevel < $quote(cmd:del) && !$allow} {
+		if {$level < $cmddel && $glevel < $cmddel && !$allow} {
 			quote:reply $type $target "access denied."
+			quote:db:close
 			return;
 		}
 		if {$id eq ""} {
@@ -318,9 +407,9 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		}
 
 		if {$tnick eq ""} { set tnick "*"}; # -- default to the last nick who spoke
-		if {$lines <= 0} { set lines 1 } elseif {$lines eq ""} { set lines 1 }; # -- default to 1 x line
+		if {$lines eq "+" || $lines <= 0} { set lines 1 } elseif {$lines eq ""} { set lines 1 }; # -- default to 1 x line
 		if {$lines eq 1 && [llength $tnicks] > 1} { set lines [llength $tnicks]}
-		if {$ignore eq ""} { set ignore 0 }; # -- ignore zero lines by default
+		if {$ignore eq "" || $ignore eq "+"} { set ignore 0 }; # -- ignore zero lines by default
 
 		set ltnick [string tolower $tnick]
 		set sorted [join [lsort -decreasing [array names lastspeak]]]
@@ -328,17 +417,19 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		foreach key $sorted {
 			lassign [split $key ,] tchan tts atnick
 			debug 3 "\002quote:\002 looping: key: tchan: $tchan -- tts: $tts: -- $atnick: [join $atnick] -- chan: $chan -- ltnick: $ltnick -- lines: $lines"
-			debug 3 "\002quote:\002 lastspeak line: [get:val lastspeak $tchan,$tts,$atnick]"
+			set lastline [get:val lastspeak $tchan,$tts,$atnick]
+			debug 3 "\002quote:\002 lastspeak line: $lastline"
+			#regsub -all {[^\s]+ACTION} $lastline {ACTION} lastline
 			if {[string tolower $chan] ne [string tolower $tchan]} { continue; }
 			debug 4 "atnick: $atnick -- tnicks: $tnicks"
 			if {[string tolower [join $atnick]] in [string tolower $tnicks] || $tnick eq "*"} {
 				# -- nick match
 				set secs [expr $tts / 1000]; # -- go from milisecs to secs
-				set race [cfg:get lastspeak:ts $chan]
+				set race $lastspeak_ts
 				if {$secs >= [expr [clock seconds] - $race]} { continue; }; # -- ignore this line, it's too recent
 				if {$ignore > 0 && $icount < $ignore} { incr icount; continue; }; # -- ignore the last N lines from the list of nicks (as a total)
 				set found 1; # -- mark it as found
-				debug 3 "\002quote:\002 appending lquote: [get:val lastspeak $tchan,$tts,$atnick] -- count: $count"
+				debug 3 "\002quote:\002 appending lquote: $lastline -- count: $count"
 				lappend asort $tts,$atnick
 				set repeat 1;
 				incr count
@@ -362,8 +453,6 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		set tquote [string trimleft $tquote "  "]; # -- strip leading spaces
 		set tquote [string trimright $tquote "\\n"]; # -- strip trailing newlines
 
-		#putlog "\002quote\002: tquote: $tquote"
-
 		# -- force the normal add
 		set what "add"
 	}
@@ -377,6 +466,11 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 			return;		
 		}
 		
+		# -- check for + for upvote and remove if present
+		if {[lrange $tquote end end] eq "+"} {
+			set tquote [lrange $tquote 0 end-1]
+		}
+
 		quote:debug 2 "quote:cmd:quote: add $tquote"
 		if {$tquote eq ""} {
 			quote:reply $stype $starget "usage: quote add <quote>"
@@ -428,6 +522,15 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 			}
 		}
 
+		# -- check if + is added on the end, to also upvote the new quote
+		if {[lrange $arg end end] eq "+"} {
+			switch -- $type {
+				pub { quote:cmd:quote $0 $1 $2 $3 $4 "+ $rowid" }
+				msg { quote:cmd:quote $0 $1 $2 $3 "+ $rowid" }
+				dcc { quote:cmd:quote $0 $1 $2 "+ $rowid" }
+			}
+		}
+
 	} elseif {$what eq "stats"} {
 		# -- return quote stats
 		set tchan [lindex $arg 1]
@@ -437,7 +540,7 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		if {$tchan ne "" && $isuser eq 0} {
 			if {$tchan eq "*"} {
 				# -- global
-				if {$glevel < $quote(cmd:del)} {
+				if {$glevel < $cmdstats} {
 					quote:reply $type $target "access denied."
 					return;
 				}
@@ -449,7 +552,7 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 					return;
 				}
 				set tlevel [db:get level levels cid $cid uid $uid]
-				if {$tlevel < $quote(cmd:del) && $glevel < $quote(cmd:del)} {
+				if {$tlevel < $cmdstats && $glevel < $cmdstats} {
 					quote:reply $type $target "access denied."
 					return;
 				}				
@@ -508,8 +611,8 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		set first "$first ORDER BY timestamp ASC LIMIT 1"
 		set last "$last ORDER BY timestamp DESC LIMIT 1"
 
-		set first [join [lindex [db:query $first] 0]]
-		set last [join [lindex [db:query $last] 0]]
+		set first [join [lindex [quote:db:query $first] 0]]
+		set last [join [lindex [quote:db:query $last] 0]]
 		
 		quote:db:close
 		# -- TODO: move timeago locally to work in standalone
@@ -530,10 +633,6 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		set qid $tquote
 		if {$qid eq ""} {
 			quote:reply $stype $starget "usage: quote + <id>"
-			return;
-		}
-		if {[string tolower $user] eq "telac" || [string tolower $nick] eq "telac"} {
-			reply $type $target "nope, not for you!"
 			return;
 		}
 		quote:debug 2 "quote:cmd:quote: increase score for quote id=$qid"
@@ -557,7 +656,7 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 		set done 1;
 
 	} elseif {$what eq "t" || $what eq "top"} {
-		if {![isop $nick $chan] && ![isvoice $nick $chan] && ($level < $quote(cmd:del))} {
+		if {![isop $nick $chan] && ![isvoice $nick $chan] && ($level < $cmdstats)} {
 			quote:reply $stype $starget "access denied."
 			return;		
 		}
@@ -597,7 +696,7 @@ proc quote:cmd:quote {0 1 2 3 {4 ""}  {5 ""}} {
 
 	if {$done} {
 		# -- create log entry for command use (if integrated to Armour)
-		if {$quote(mode) eq 2} { log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" "" }
+		if {$quote(mode) eq 2} { log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] "[join $arg]" "$source" "" "" "" }
 	}
 }
 
@@ -607,7 +706,7 @@ proc quote:correct {chan regex} {
 	variable lastspeak; # -- tracks the last line a nick spoke in a chan (by 'chan,nick')
 	variable dbchans;   # -- dict for db channels
 
-	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[dict get $dictData chan] eq $chan} }]]
+	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} }]]
 	if {$cid eq ""} { return; }; # -- channel not registered
 	if {[dict exists $dbchans $cid correct]} {
 		set correct [dict get $dbchans $cid correct]
@@ -646,7 +745,7 @@ proc quote:cron {minute hour day month weekday} {
 		set randid [quote:db:query "SELECT id FROM quotes WHERE cid='$cid' ORDER BY RANDOM() LIMIT 1"]
 		set query "SELECT quote FROM quotes WHERE id='$randid' AND cid='$cid'"
 		set quote [join [quote:db:query $query]]
-		debug 1 "\002quote:cron\002 sending periodic random quote to $chan: [join $quote]"
+		debug 0 "\002quote:cron\002 sending periodic random quote to $chan: [join $quote]"
 		set lines [split [join $quote] \n]
 		foreach line $lines {
 			quote:reply msg $chan "\002\[id:\002 $randid\002\]\002 [join $line]"
@@ -686,6 +785,7 @@ proc quote:escape {value} {
 	return $nvalue;
 }
 
+
 # -- remember the last line a nick spoke in a given channel (privmsg)
 proc quote:pubm {nick uhost hand chan text} {
 	# -- check for correction regex
@@ -696,14 +796,18 @@ proc quote:pubm {nick uhost hand chan text} {
 			return;
 		}
 	}
+	if {[regexp -- {^\001ACTION} $text]} { 
+		# -- ignoring ACTION
+		return;
+	} 
 	quote:addspeak $nick $uhost $hand [string tolower $chan] "<$nick> $text";
 }
 
 # -- remember the last line a nick spoke in a given channel (action)
 proc quote:action {nick uhost hand dest keyword text} { 
 	# -- only process channel actions 
-	if {[string index $dest 0] ne "#"} { return; }
-	set action "* $nick $text"
+	if {[string index $dest 0] ne "#"} { return; }	
+	set action "* $nick [lrange $text 0 end]"
 
 	# -- check for correction regex
 	if {[regexp {^s/([^\/]*)/([^\/]*)/$} $action]} {
@@ -718,15 +822,22 @@ proc quote:action {nick uhost hand dest keyword text} {
 
 # -- remember the last line a nick spoke in a given channel
 proc quote:addspeak {nick uhost hand chan text} {
-	variable dbchans; # -- dict with database channels
-	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[dict get $dictData chan] eq $chan} }]]
+	variable dbchans;   # -- dict with database channels
+	variable lastspeak; # -- tracks the last line a nick spoke in a chan (by 'chan,ts,nick')
+	variable lastspeak_mins
+	set cid [dict keys [dict filter $dbchans script {id dictData} { expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} }]]
 	if {$cid eq ""} { return; }; # -- channel not registered
-
 	set snick [split $nick]
-	variable lastspeak;          # -- tracks the last line a nick spoke in a chan (by 'chan,nick')
 	set ts [clock milliseconds]; # -- track when spoken, to have race condition mitigation when someone does 'quote add last <nick>' and they very recently spoke something else
 	set lastspeak($chan,$ts,$snick) $text
-	timer [cfg:get lastspeak:mins $chan] "arm::debug 5 \"quote:pubm: unsetting lastspeak($chan,$ts,$snick)\"; unset arm::lastspeak($chan,$ts,$snick)"
+	timer $lastspeak_mins "arm::quote:unset:lastspeak $chan $ts $snick"
+}
+
+# -- unset the lastspeak
+proc quote:unset:lastspeak {chan ts nick} {
+	variable lastspeak; # -- tracks the last line a nick spoke in a chan (by 'chan,ts,nick')
+	arm::debug 5 "quote:unset:lastspeak: unsetting lastspeak($chan,$ts,$nick)"; 
+	unset lastspeak($chan,$ts,[split $nick])
 }
 
 # -- check if quote is enabled on a channel
@@ -746,11 +857,26 @@ if {[catch {package require sqlite3} fail]} {
 }
 
 
+# -- setup vars
+if {$quote(mode) eq 2} {
+	variable lastspeak_mins
+	variable lastspeak_ts
+	# -- integrated
+	set lastspeak_mins [cfg:get quote:lastspeak:mins *]
+	set lastspeak_ts [cfg:get quote:lastspeak:ts *]
+} else {
+	# -- standalone
+	set lastspeak_mins $quote(lastspeak:mins)
+	set lastspeak_ts $quote(lastspeak:ts)
+}
+
+
 # -- db connect
 proc quote:db:connect {} { sqlite3 quotesql "./armour/db/$::arm::dbname.db" }
 # -- escape chars
 proc quote:db:escape {what} { return [string map {' ''} $what] }
 proc quote:db:last:rowid {} { quotesql last_insert_rowid }
+
 
 # -- query abstract
 proc quote:db:query {query} {
@@ -764,6 +890,8 @@ proc quote:db:query {query} {
 	}
 	return $res
 }
+
+
 # -- db close
 proc quote:db:close {} { quotesql close }
 
@@ -772,6 +900,7 @@ if {[catch {quote:db:connect} fail]} {
 	putlog "\[@\] unable to create sqlite database. check directory permissions."
 	return false
 }
+
 
 # -- create quotes
 quote:db:query "CREATE TABLE IF NOT EXISTS quotes (\
