@@ -6626,7 +6626,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     if {$globlevel eq ""} { set globlevel 0 }
 
     set candronebl 0; set canircbl 0; set xtra1 ""; set canrbl 0;
-    if {[info command ::dronebl::submit] ne "" && [userdb:get:level $user $chan] >= [cfg:get dronebl:lvl $chan]} {
+    if {[info commands ::dronebl::submit] ne "" && [userdb:get:level $user $chan] >= [cfg:get dronebl:lvl $chan]} {
         set candronebl 1; set canrbl 1; append xtra1 "|dronebl"; set xtra2 " \[reason|comment\]"
     } else { set xtra2 " \[reason\]" }
 
@@ -6637,6 +6637,13 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     set syntax "\002usage:\002 add ?chan? <white|black${xtra1}> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? $xtra2"
 
     if {$list eq "dronebl" || $list eq "ircbl"} {
+        # --- THIS IS THE NEW, CRITICAL CHECK ---
+        if {[info commands ::dronebl::submit] == ""} {
+            reply $stype $starget "\002Error:\002 DroneBL commands are not available. This is likely due to a network timeout when the script started. Please rehash the bot and try again later."
+            return
+        }
+        # --- END OF NEW CHECK ---
+
         if {$value eq "" || $method eq ""} {
             if {$canrbl} {
                 reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[comment\]"
@@ -6664,7 +6671,6 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
             if {$list eq "dronebl"} {
                 set ttype [cfg:get dronebl:type $chan];
-                # -- CORRECTED LOGIC: Use 'submit' not 'lookup'
                 if {[::dronebl::submit "$ttype $ip"]} {
                     debug 1 "arm:cmd:add: dronebl submit successful (ip: $ip, type: $ttype)"
                     reply $type $target "DroneBL submit successful (\002ip:\002 $ip)"
