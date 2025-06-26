@@ -20085,19 +20085,11 @@ utimer [expr [cfg:get queue:secure *] / 2] arm::voice:stack; # -- offset the voi
 #flud:queue; 
 
 # -- load dronebl package if required
-if {[cfg:get dronebl] eq 1} {
-    putlog "\[@\] Armour: DEBUG: DroneBL enabled. Scheduling library load in 1 second."
+if {[cfg:get dronebl] eq 1} { 
     namespace eval dronebl {
         set rpckey $arm::cfg(dronebl:key)
     }
-    # Use 'after' to delay loading, circumventing a potential race condition
-    after 1000 {
-         putlog "\[@\] Armour: DEBUG: 'after' command now sourcing libdronebl.tcl"
-         catch {source ./armour/packages/libdronebl.tcl} err
-         if {$err ne ""} {
-             putlog "\[@\] Armour: DEBUG: Error sourcing libdronebl.tcl inside 'after' command: $err"
-         }
-    }
+    source ./armour/packages/libdronebl.tcl 
 }
 
 # -- set bot realname
