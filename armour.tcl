@@ -9007,7 +9007,7 @@ proc raw:genwho {server cmd arg} {
         # -- IRCnet/EFnet
         #server    cmd    mynick type ident host server nick away :hopcount sid rname
         #irc.psychz.net    352    cori * _mxl    ipv4.pl    ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick type chan ident host server nick flags hopcount sid
+        lassign $arg mynick chan ident host server nick flags hopcount sid
         set rname [lrange $arg 10 end]
         # -- NOTE: the above raw example doesn't appear to provide an actual IP; do a DNS lookup (doh! this slows us down)
         if {![isValidIP $host]} {
@@ -15339,7 +15339,7 @@ proc userdb:raw:genwho {server cmd arg} {
     } elseif {$ircd eq "2"} {      
         # -- IRCnet
         #irc.psychz.net 352 cori * _mxl ipv4.pl ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick type ident host server nick away hopcount sid
+        lassign $arg mynick ident host server nick away hopcount sid
         set rname [lrange $arg 9 end]
         # -- NOTE:  The above raw example doesn't appear to provide an actual IP;
         # --        A DNS lookup would slow us down; be doubled up from real scans; and isn't needed for autologin
