@@ -1,4 +1,4 @@
-# armour/packages/arm-24_web.tcl - An enhanced, self-contained web interface for Armour (with Login Debugging)
+# armour/packages/arm-24_web.tcl - An enhanced, self-contained web interface for Armour (Final Version)
 
 namespace eval ::arm::web {
 
@@ -18,10 +18,8 @@ namespace eval ::arm::web {
         ::arm::debug 0 "\[@\] Armour: Starting web interface on port $port"
     }
 
+    # This procedure is called when a new browser connects. It now handles everything.
     proc accept {sock addr p} {
-        # ... (This procedure remains the same as the previous version) ...
-        # NOTE: For brevity, the full accept procedure is not shown here, assume it's the same as the last version you were given.
-        # The key change is in 'process_login' below.
         variable sessions
         fconfigure $sock -buffering line -translation lf
 
@@ -29,6 +27,7 @@ namespace eval ::arm::web {
             catch {close $sock}; return
         }
 
+        # --- Read Headers ---
         set headers [dict create]
         while {[gets $sock line] > 0 && $line ne "\r"} {
             if {[regexp {^([^:]+): (.*)} $line -> key value]} {
@@ -38,17 +37,19 @@ namespace eval ::arm::web {
         
         lassign $request_line method path version
 
+        # --- Session Check & Access Control ---
         set user ""
         if {[dict exists $headers Cookie]} {
             set cookie_str [dict get $headers Cookie]
             if {[regexp {session_id=([^; ]+)} $cookie_str -> session_id] && [dict exists $sessions $session_id]} {
                 set user [dict get $sessions $session_id]
                 if {[::arm::userdb:get:level $user *] < [::arm::cfg:get web:level]} {
-                    set user ""
+                    set user "" ; # Invalidate session if user's level is too low
                 }
             }
         }
 
+        # --- ROUTING LOGIC ---
         set post_data ""
         if {$method eq "POST"} {
             set content_length 0
@@ -58,37 +59,64 @@ namespace eval ::arm::web {
             }
         }
         
+        # Security Gate: Handle unauthenticated users first.
         if {$user eq ""} {
             if {$path eq "/login"} {
                 if {$method eq "POST"} {
                     process_login $sock $post_data
                 } else {
+                    # Serve the login page for GET /login
                     send_page $sock "Login" [login_page]
                 }
             } else {
+                # Not logged in and not requesting the login page, so redirect to it.
                 redirect $sock "/login"
             }
         } else {
+            # --- If we reach here, the user IS authenticated ---
             switch -exact -- $path {
-                "/" { send_page $sock "Dashboard" [dashboard_page] }
-                "/lists" { send_page $sock "Manage Lists" [lists_page] }
-                "/users" { send_page $sock "Manage Users" [users_page] }
-                "/channels" { send_page $sock "Manage Channels" [channels_page] }
-                "/events" { send_page $sock "Recent Events" [events_page] }
-                "/login" { redirect $sock "/" }
-                "/logout" { logout_handler $sock $headers }
-                "/add-entry" { if {$method eq "POST"} { process_add_entry $sock $post_data $user } else { redirect $sock "/lists" } }
-                "/remove-entry" { if {$method eq "POST"} { process_remove_entry $sock $post_data } else { redirect $sock "/lists" } }
-                "/update-access" { if {$method eq "POST"} { process_update_access $sock $post_data } else { redirect $sock "/users" } }
-                "/update-channel" { if {$method eq "POST"} { process_update_channel $sock $post_data } else { redirect $sock "/channels" } }
-                default { send_page $sock "Not Found" "<h2>404 Not Found</h2>" "404 Not Found" }
+                "/" {
+                    send_page $sock "Dashboard" [dashboard_page]
+                }
+                "/lists" {
+                    send_page $sock "Manage Lists" [lists_page]
+                }
+                "/users" {
+                    send_page $sock "Manage Users" [users_page]
+                }
+                "/channels" {
+                    send_page $sock "Manage Channels" [channels_page]
+                }
+                "/events" {
+                    send_page $sock "Recent Events" [events_page]
+                }
+                "/login" {
+                    redirect $sock "/" ; # Already logged in, go to dashboard
+                }
+                "/logout" {
+                    logout_handler $sock $headers
+                }
+                "/add-entry" {
+                    if {$method eq "POST"} { process_add_entry $sock $post_data $user } else { redirect $sock "/lists" }
+                }
+                "/remove-entry" {
+                    if {$method eq "POST"} { process_remove_entry $sock $post_data } else { redirect $sock "/lists" }
+                }
+                "/update-access" {
+                    if {$method eq "POST"} { process_update_access $sock $post_data } else { redirect $sock "/users" }
+                }
+                "/update-channel" {
+                    if {$method eq "POST"} { process_update_channel $sock $post_data } else { redirect $sock "/channels" }
+                }
+                default {
+                    send_page $sock "Not Found" "<h2>404 Not Found</h2>" "404 Not Found"
+                }
             }
         }
         
         flush $sock
         catch {close $sock}
     }
-
 
     # --- UTILITY PROCEDURES ---
     
@@ -131,78 +159,45 @@ namespace eval ::arm::web {
 
     # --- ACTION HANDLERS ---
     
-    # ***************************************************************
-    # ** THIS IS THE MODIFIED PROCEDURE WITH DEBUGGING AND CATCHING **
-    # ***************************************************************
     proc process_login {sock post_data} {
-        # Wrap the entire procedure in a catch to find the error
         if {[catch {
             variable sessions
-            ::arm::debug 0 "WEB: process_login started."
-
             set form_data [dict create]
             foreach pair [split $post_data &] {
                 lassign [split $pair =] key value
                 dict set form_data [url_decode $key] [url_decode $value]
             }
-            ::arm::debug 0 "WEB: Form data parsed."
 
             set username ""; set password ""
             if {[dict exists $form_data username]} { set username [dict get $form_data username] }
             if {[dict exists $form_data password]} { set password [dict get $form_data password] }
-            ::arm::debug 0 "WEB: Attempting login for user: '$username'"
             
             set authenticated 0
+            
             if {$username ne "" && $password ne ""} {
-                ::arm::debug 0 "WEB: Entering authentication loop..."
                 foreach {uid udata} $::arm::dbusers {
-                    # ::arm::debug 0 "WEB: Checking user ID $uid"
                     if {[string equal -nocase [dict get $udata user] $username]} {
-                        ::arm::debug 0 "WEB: Matched user '$username'. Checking password."
                         if {[dict get $udata pass] eq [::arm::userdb:encrypt $password]} {
                             set authenticated 1
-                            ::arm::debug 0 "WEB: Password authenticated."
-                        } else {
-                            ::arm::debug 0 "WEB: Password MISMATCH."
                         }
                         break
                     }
                 }
-                ::arm::debug 0 "WEB: Exited authentication loop. Authenticated status: $authenticated"
             }
 
-            if {$authenticated} {
-                ::arm::debug 0 "WEB: Checking access level..."
-                set user_level [::arm::userdb:get:level $username *]
-                set web_level [::arm::cfg:get web:level]
-                ::arm::debug 0 "WEB: User level: $user_level, Required level: $web_level"
-                if {$user_level >= $web_level} {
-                    ::arm::debug 0 "WEB: Access granted. Creating session."
-                    set session_id [::sha1::sha1 -hex "[clock clicks][clock seconds][expr {rand()}]"]
-                    dict set sessions $session_id $username
-                    puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=$session_id; Path=/; HttpOnly; SameSite=Strict\r\nLocation: /\r\n\r\n"
-                    ::arm::debug 0 "WEB: Login success response sent."
-                } else {
-                     ::arm::debug 0 "WEB: Access denied (level too low). Sending failure page."
-                    send_page $sock "Login" [login_page "Invalid credentials or insufficient access level."]
-                }
+            if {$authenticated && [::arm::userdb:get:level $username *] >= [::arm::cfg:get web:level]} {
+                set session_id [::sha1::sha1 -hex "[clock clicks][clock seconds][expr {rand()}]"]
+                dict set sessions $session_id $username
+                puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=$session_id; Path=/; HttpOnly; SameSite=Strict\r\nLocation: /\r\n\r\n"
             } else {
-                ::arm::debug 0 "WEB: Authentication failed. Sending failure page."
                 send_page $sock "Login" [login_page "Invalid credentials or insufficient access level."]
             }
-
         } error_message]} {
-            # This block executes ONLY if a Tcl error occurred above
-            ::arm::debug 0 "\n\n\x0304!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-            ::arm::debug 0 "WEB: \x0304FATAL LOGIN ERROR:\x03 $error_message"
-            ::arm::debug 0 "WEB: \x0304Error Info:\x03 $::errorInfo"
-            ::arm::debug 0 "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n"
+            ::arm::debug 0 "\n\n\x0304FATAL LOGIN ERROR:\x03 $error_message\n$::errorInfo\n"
             send_page $sock "Error" "<h2>500 Internal Server Error</h2><p>The server encountered an unrecoverable error while processing your request. Please check the bot's log file for details.</p>" "500 Internal Server Error"
         }
     }
 
-    # ... (All other procedures remain the same as the previous version) ...
-    # NOTE: For brevity, they are not all shown here. Assume they are the same.
     proc logout_handler {sock headers} {
         variable sessions
         if {[dict exists $headers Cookie]} {
@@ -266,6 +261,8 @@ namespace eval ::arm::web {
         ::arm::db:close
         redirect $sock "/channels"
     }
+
+    # --- PAGE GENERATORS ---
 
     proc login_page {{error ""}} {
         if {$error ne ""} { set error "<p style='color:red;'>$error</p>" }
@@ -344,6 +341,9 @@ namespace eval ::arm::web {
         return $body
     }
     
+    # ***************************************************************
+    # ** THIS IS THE MODIFIED PROCEDURE WITH THE FIX **
+    # ***************************************************************
     proc channels_page {} {
         set body "<h1>Channel Management</h1>"
         
@@ -361,7 +361,17 @@ namespace eval ::arm::web {
             append body "<form action='/update-channel' method='POST'><fieldset><legend><h3>[html_escape $chan]</h3></legend>"
             append body "<input type='hidden' name='cid' value='$cid'>"
 
-            set current_mode [dict get $settings mode]
+            # ** FIX: Check if keys exist before trying to access them **
+            set current_mode ""
+            if {[dict exists $settings mode]} { set current_mode [dict get $settings mode] }
+            
+            set url_val ""
+            if {[dict exists $settings url]} { set url_val [html_escape [dict get $settings url]] }
+
+            set desc_val ""
+            if {[dict exists $settings desc]} { set desc_val [html_escape [dict get $settings desc]] }
+            
+            # Mode Setting
             append body "<label for='mode_$cid'>Mode</label><select id='mode_$cid' name='mode'>"
             foreach mode_option {on off secure} {
                 set selected [expr {$current_mode eq $mode_option ? "selected" : ""}]
@@ -369,8 +379,9 @@ namespace eval ::arm::web {
             }
             append body "</select>"
             
-            append body "<label for='url_$cid'>URL</label><input type='text' id='url_$cid' name='url' value='[html_escape [dict get $settings url]]'>"
-            append body "<label for='desc_$cid'>Description</label><input type='text' id='desc_$cid' name='desc' value='[html_escape [dict get $settings desc]]'>"
+            # URL and Desc Settings
+            append body "<label for='url_$cid'>URL</label><input type='text' id='url_$cid' name='url' value='$url_val'>"
+            append body "<label for='desc_$cid'>Description</label><input type='text' id='desc_$cid' name='desc' value='$desc_val'>"
             
             append body "<button type='submit'>Update [html_escape $chan]</button></fieldset></form>"
         }
@@ -380,9 +391,6 @@ namespace eval ::arm::web {
     }
 
     proc lists_page {} {
-        set add_form { <fieldset> ... </fieldset> }
-        set body "<h1>Manage Lists</h1>$add_form ..."
-        # ... (lists_page remains the same as previous version) ...
         set add_form {
             <fieldset>
                 <legend><h2>Add New Entry</h2></legend>
