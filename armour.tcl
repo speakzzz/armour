@@ -13685,7 +13685,7 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
     
     # -- ensure user has required access for command
     lassign [db:get id,user users curnick $nick] uid user
-    if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
+    if {![userdb:isAllowed $nick $cmd $chan $type]} { return; };
     # -- end default proc template
 
     set params [llength $arg]
@@ -13717,13 +13717,10 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
     }
     
     if {$globlvl ne ""} {
-        # -- check if valid
         if {![regexp -- {^\d+} $globlvl]} {
             reply $type $target "\002(\002error\002)\002 global access level must be 1-500."
             return;
         }
-
-        # -- check they have the access
         set sgloblvl [db:get level levels uid $uid cid 1]
         if {$sgloblvl eq ""} { set sgloblvl 0 }
         if {$globlvl >= $sgloblvl} {
@@ -13731,39 +13728,36 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
             return;
         }
     } else {
-        set globlvl [cfg:get register:level $chan]; # -- default newuser global level
+        set globlvl [cfg:get register:level $chan]; 
     }; 
     
-    # -- valid username?
     if {![regexp -- {^[A-Za-z0-9_]{1,15}$} $trguser]} {
         reply $type $target "\002(\002error\002)\002 bogus username. (1-15 alphanumeric chars only)";
         return;
     }
 
-    # -- check if target user exists
     if {[userdb:isValiduser $trguser]} {
         reply $type $target "\002(\002error\002)\002 [userdb:user:get user user $trguser] already exists";
         return;
     }
     
-    # -- reserved usernames 
-    # -- helps with internal bot stats recollection (cmd: report)
     if {[string tolower $trguser] eq "bot" || [string tolower $trguser] eq "usernames" || [string tolower $trguser] eq [string tolower ${botnet-nick}] \
         || [string tolower $trguser] eq [string tolower $botnick] || [string tolower $trguser] eq $::uservar} { 
         reply $type $target "\002(\002error\002)\002 reserved username.";
         return;
     }
 
-    # -- check level
     if {![userdb:isInteger $globlvl]} { reply $type $target "valid levels: 1-500"; return; }
     set level [userdb:get:level $user *]
     if {$globlvl >= $level} { reply $type $target "error: cannot add a user with a level equal to or above your own."; return; }
     
-    # -- check it xuser is already assigned to a user
-    set xuser [userdb:user:get xuser xuser $trgxuser]
-    if {$xuser ne ""} {
-        reply $type $target "\002error:\002 network account \002$xuser\002 is already associated with user: \002[userdb:user:get user xuser $xuser]\002";
-        return;
+    # ** FIX: Only check for existing xuser if one was provided **
+    if {$trgxuser ne ""} {
+        set xuser [userdb:user:get xuser xuser $trgxuser]
+        if {$xuser ne ""} {
+            reply $type $target "\002error:\002 network account \002$xuser\002 is already associated with user: \002[userdb:user:get user xuser $xuser]\002";
+            return;
+        }
     }
 
     # -- add the user
@@ -13775,17 +13769,18 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
     db:query "INSERT INTO users (user,xuser,pass,register_ts,register_by) VALUES ('$db_user', '$db_xuser', '$encpass','$reg_ts','$reg_by')"
     set userid [db:last:rowid]
 
-    # -- store in dbusers dict
-    dict set dbusers $userid [list user $trguser account $trgxuser pass $encpass register_ts $reg_ts register_by $reg_by \
+    # ** FIX: Use 'dict create' instead of 'list' to create a valid sub-dictionary **
+    dict set dbusers $userid [dict create user $trguser account $trgxuser pass $encpass register_ts $reg_ts register_by $reg_by \
         email "" languages "" curnick "" curhost "" lastnick "" lasthost "" lastseen ""]
+
     if {$globlvl eq 0} {
         set globlvl "none"
     } else {
-        # -- add global access
         set added_ts [unixtime]
         db:query "INSERT INTO levels (cid,uid,level,added_ts,added_bywho,modif_ts,modif_bywho) \
-            VALUES (1,$userid,$globlvl,$added_ts,$uid,$added_ts,$uid)"
+            VALUES (1,$userid,$globlvl,$added_ts,'$reg_by',$added_ts,'$reg_by')"
     }
+    db:close
             
     debug 1 "userdb:cmd:newuser: created user: $trguser (id: $userid -- xuser: $trgxuser -- level: $globlvl)"
     
@@ -13796,12 +13791,10 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
         reply notc $nick "\002note:\002 temporary password for user \002$trguser\002 is: $genpass"
     }
     
-    # -- attempt autologin via /WHO on xuser
     if {$trgxuser ne ""} {
         putquick "WHO $trgxuser a%nuhiat,101"
     }
     
-    # -- create log entry for command use
     log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
 }
 
