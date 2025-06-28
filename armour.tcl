@@ -2349,37 +2349,40 @@ proc cidr:match {ip cidr} {
 }
 
 # Helper function to convert IPv6 to a binary string representation
-# This is a complex task in pure Tcl. A simplified version is shown.
-# A robust solution would need to properly expand "::" and handle all cases.
 proc ipv6_to_binary {ipv6} {
-    # This is a non-trivial conversion. For a real implementation, a known-good
-    # library or a more robust procedure would be necessary.
-    # The following is a conceptual representation.
     catch {
-        # Expand "::"
-        set double_colon [string first "::" $ipv6]
-        if {$double_colon != -1} {
+        # Expand "::" notation
+        if {[string first "::" $ipv6] != -1} {
             set parts [split $ipv6 "::"]
             set left_parts [split [lindex $parts 0] ":"]
             set right_parts [split [lindex $parts 1] ":"]
+            
             if {[lindex $left_parts 0] eq ""} { set left_parts {} }
             if {[lindex $right_parts 0] eq ""} { set right_parts {} }
-            set missing [string repeat ":0" [expr {8 - [llength $left_parts] - [llength $right_parts]}]]
-            set ipv6 "[join $left_parts ":"]$missing:[join $right_parts ":"]"
-            if {[string first ":" $ipv6] == 0} { set ipv6 [string range $ipv6 1 end] }
+
+            set missing_zeros [expr {8 - [llength $left_parts] - [llength $right_parts]}]
+            set zero_groups [list]
+            for {set i 0} {$i < $missing_zeros} {incr i} {
+                lappend zero_groups "0"
+            }
+            
+            set expanded_parts [concat $left_parts $zero_groups $right_parts]
+            set ipv6 [join $expanded_parts ":"]
         }
         
         set binary_str ""
         foreach group [split $ipv6 ":"] {
-            set bin [binary format H* "0000$group"]
-            binary scan $bin B* b
-            append binary_str [string range $b end-15 end]
+            # ** FIX: Process each group as a number and format it to a 16-bit binary string **
+            # This is more robust than using 'binary format H*' directly on the string.
+            if {$group eq ""} { set group "0" }
+            set decimal "0x$group"
+            set bin [format %016b $decimal]
+            append binary_str $bin
         }
         return $binary_str
     }
     return "" ;# Return empty on error
 }
-
 putlog "\[@\] Armour: loaded CIDR matching procedure."
 }
 # -- end namespace
@@ -9964,7 +9967,7 @@ proc scan {nick chan full clicks ident ip host xuser rname} {
     } else { set dnsbl $dnsbl }
     
     # -- turn off dnsbl & port scans if umode +x or service
-    if {$ip eq "127.0.0.1" || $ip eq "0::"} { set dnsbl 0; set portscan 0; set ipscan 0 }
+    if {$ip eq "127.0.0.1" || $ip eq "0::" || ($ip eq "0" && ![isValidIP $host])} { set dnsbl 0; set portscan 0; set ipscan 0 }
     
     # -- turn off dnsbl & port scans if rfc1918 ip space
     if { [cidr:match $ip "10.0.0.0/8"]     } { set dnsbl 0; set ipscan 0; set portscan 0 } \
