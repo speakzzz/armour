@@ -2348,45 +2348,37 @@ proc cidr:match {ip cidr} {
     return [expr {[string range $ipBin 0 [expr {$prefix - 1}]] eq [string range $netBin 0 [expr {$prefix - 1}]]}]
 }
 
-# Helper function to convert IPv6 to a binary string representation
-proc ipv6_to_binary {ipv6} {
-    catch {
-        # Expand "::" notation
-        if {[string first "::" $ipv6] != -1} {
-            set parts [split $ipv6 "::"]
-            set left_parts [split [lindex $parts 0] ":"]
-            set right_parts [split [lindex $parts 1] ":"]
-            
-            if {[lindex $left_parts 0] eq ""} { set left_parts {} }
-            if {[lindex $right_parts 0] eq ""} { set right_parts {} }
-
-            set missing_zeros [expr {8 - [llength $left_parts] - [llength $right_parts]}]
-            set zero_groups [list]
-            for {set i 0} {$i < $missing_zeros} {incr i} {
-                lappend zero_groups "0"
-            }
-            
-            set expanded_parts [concat $left_parts $zero_groups $right_parts]
-            set ipv6 [join $expanded_parts ":"]
+# FINAL CORRECTED VERSION
+proc ipv6_to_binary {ipv6_addr} {
+    set expanded_addr $ipv6_addr
+    # Check for and expand "::" notation
+    if {[string first "::" $expanded_addr] != -1} {
+        set num_colons [expr {[string length [regsub -all {[^:]} $expanded_addr ""]]}]
+        set num_to_add [expr {7 - $num_colons}]
+        set replacement_str ":"
+        for {set i 0} {$i < $num_to_add} {incr i} {
+            append replacement_str "0:"
         }
-        
-        set binary_str ""
-        foreach group [split $ipv6 ":"] {
-            # ** FIX: Process each group as a number and format it to a 16-bit binary string **
-            # This is more robust than using 'binary format H*' directly on the string.
-            if {$group eq ""} { set group "0" }
-            set decimal "0x$group"
-            set bin [format %016b $decimal]
-            append binary_str $bin
-        }
-        return $binary_str
+        set expanded_addr [regsub -- "::" $expanded_addr $replacement_str]
+        # Handle edge cases like :: at the beginning or end
+        if {[string index $expanded_addr 0] eq ":"} { set expanded_addr "0$expanded_addr" }
+        if {[string index $expanded_addr end] eq ":"} { set expanded_addr "${expanded_addr}0" }
     }
-    return "" ;# Return empty on error
+
+    # Build the final 128-bit binary string
+    set binary_str ""
+    foreach group [split $expanded_addr ":"] {
+        if {$group eq ""} { set group "0" }
+        set decimal "0x$group"
+        set bin [format %016b $decimal]
+        append binary_str $bin
+    }
+    return $binary_str
 }
+
 putlog "\[@\] Armour: loaded CIDR matching procedure."
 }
 # -- end namespace
-
 
 
 # ------------------------------------------------------------------------------------------------
