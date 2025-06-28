@@ -3613,11 +3613,6 @@ proc bot:send:dnsbl {bot cmd text} {
     set start [clock clicks]
     lassign $text nick ident host ip chan
 
-    if {[string match "*:*" $ip]} {
-        # -- don't continue if IPv6 (TODO)
-        debug 0 "bot:send:dnsbl: (from: $bot) -- halting scan for IPv6 dnsbl IP (ip: $ip)"
-        return;
-    }
     debug 1 "bot:send:dnsbl: (from: $bot) -- scanning for dnsbl match: $ip (host: $host)"
     # -- get score
     set response [rbl:score $ip]
@@ -16033,17 +16028,24 @@ proc isValidIP {ip} {
     return 0
 }
 
-# -- checks if IP is localhost or rfc1918
-# -- avoid IPv6 and hostnames
+# -- checks if IP is localhost or rfc1918/private (supports IPv4 and IPv6)
 proc ip:isLocal {ip} {
-    if {$ip eq "0::"} { return 1; }
-    if {[string match "*:*" $ip] eq 1} { return 0; }; # -- cidr:match will fail on IPv6
-    if {![regexp -- {^\d+\.\d+\.\d+\.\d+} $ip]} { return 0; }; # -- must be IPv4; ensure this is not a hostname
-    if {$ip eq "127.0.0.1"} { return 1; }
+    # Check if the address is IPv6
+    if {[string first ":" $ip] != -1} {
+        if {[cidr:match $ip "::1/128"]} { return 1 }      ;# Loopback
+        if {[cidr:match $ip "fe80::/10"]} { return 1 }     ;# Link-Local
+        if {[cidr:match $ip "fc00::/7"]} { return 1 }      ;# Unique Local Address
+        return 0; # It's a public IPv6 address
+    }
+
+    # Fallback to IPv4 checks
+    if {![regexp {^\d+\.\d+\.\d+\.\d+} $ip]} { return 0; }; # Not a valid IPv4 format
+    if {$ip eq "127.0.0.1"} { return 1 }
     if {[cidr:match $ip "10.0.0.0/8"]     } { return 1 }
     if {[cidr:match $ip "172.16.0.0/12"]  } { return 1 }
     if {[cidr:match $ip "192.168.0.0/16"] } { return 1 }
-    return 0;
+
+    return 0; # It's a public IPv4 address
 }
 
 putlog "\[@\] Armour: loaded asynchronous dns resolver."
