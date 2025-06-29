@@ -1,14 +1,14 @@
 # armour/packages/arm-24_web.tcl - An enhanced, self-contained web interface for Armour
-# This version includes UI/UX improvements for live table filtering.
+# This version includes UI/UX improvements, pagination, and a critical performance fix for the page-loading logic.
 
 namespace eval ::arm::web {
 
     # This dictionary will store our active sessions: {session_id -> username}
     variable sessions [dict create]
+    variable items_per_page 25
 
     # --- CORE SERVER PROCEDURES ---
 
-    # Main procedure to start the web server socket
     proc start_server {} {
         if {![::arm::cfg:get web:enable]} { return }
         set port [::arm::cfg:get web:port]
@@ -19,7 +19,6 @@ namespace eval ::arm::web {
         ::arm::debug 0 "\[@\] Armour: Starting web interface on port $port"
     }
 
-    # This procedure is called when a new browser connects. It now handles everything.
     proc accept {sock addr p} {
         variable sessions
         fconfigure $sock -buffering line -translation lf
@@ -28,7 +27,6 @@ namespace eval ::arm::web {
             catch {close $sock}; return
         }
 
-        # --- Read Headers ---
         set headers [dict create]
         while {[gets $sock line] > 0 && $line ne "\r"} {
             if {[regexp {^([^:]+): (.*)} $line -> key value]} {
@@ -36,21 +34,38 @@ namespace eval ::arm::web {
             }
         }
         
-        lassign $request_line method path version
+        lassign $request_line method request_uri version
+        
+        set query_params [dict create]
+        if {[string first "?" $request_uri] != -1} {
+            lassign [split $request_uri "?"] path query_string
+            foreach pair [split $query_string &] {
+                lassign [split $pair =] key value
+                dict set query_params [url_decode $key] [url_decode $value]
+            }
+        } else {
+            set path $request_uri
+        }
+        
+        set page 1
+        if {[dict exists $query_params page]} {
+            set page_val [dict get $query_params page]
+            if {[string is integer -strict $page_val] && $page_val > 0} {
+                set page $page_val
+            }
+        }
 
-        # --- Session Check & Access Control ---
         set user ""
         if {[dict exists $headers Cookie]} {
             set cookie_str [dict get $headers Cookie]
             if {[regexp {session_id=([^; ]+)} $cookie_str -> session_id] && [dict exists $sessions $session_id]} {
                 set user [dict get $sessions $session_id]
                 if {[::arm::userdb:get:level $user *] < [::arm::cfg:get web:level]} {
-                    set user "" ; # Invalidate session if user's level is too low
+                    set user ""
                 }
             }
         }
 
-        # --- ROUTING LOGIC ---
         set post_data ""
         if {$method eq "POST"} {
             set content_length 0
@@ -60,58 +75,26 @@ namespace eval ::arm::web {
             }
         }
         
-        # Security Gate: Handle unauthenticated users first.
         if {$user eq ""} {
             if {$path eq "/login"} {
-                if {$method eq "POST"} {
-                    process_login $sock $post_data
-                } else {
-                    # Serve the login page for GET /login
-                    send_page $sock "Login" [login_page]
-                }
+                if {$method eq "POST"} { process_login $sock $post_data } else { send_page $sock "Login" [login_page] }
             } else {
-                # Not logged in and not requesting the login page, so redirect to it.
                 redirect $sock "/login"
             }
         } else {
-            # --- If we reach here, the user IS authenticated ---
             switch -exact -- $path {
-                "/" {
-                    send_page $sock "Dashboard" [dashboard_page]
-                }
-                "/lists" {
-                    send_page $sock "Manage Lists" [lists_page]
-                }
-                "/users" {
-                    send_page $sock "Manage Users" [users_page]
-                }
-                "/channels" {
-                    send_page $sock "Manage Channels" [channels_page]
-                }
-                "/events" {
-                    send_page $sock "Recent Events" [events_page]
-                }
-                "/login" {
-                    redirect $sock "/" ; # Already logged in, go to dashboard
-                }
-                "/logout" {
-                    logout_handler $sock $headers
-                }
-                "/add-entry" {
-                    if {$method eq "POST"} { process_add_entry $sock $post_data $user } else { redirect $sock "/lists" }
-                }
-                "/remove-entry" {
-                    if {$method eq "POST"} { process_remove_entry $sock $post_data } else { redirect $sock "/lists" }
-                }
-                "/update-access" {
-                    if {$method eq "POST"} { process_update_access $sock $post_data } else { redirect $sock "/users" }
-                }
-                "/update-channel" {
-                    if {$method eq "POST"} { process_update_channel $sock $post_data } else { redirect $sock "/channels" }
-                }
-                default {
-                    send_page $sock "Not Found" "<h2>404 Not Found</h2>" "404 Not Found"
-                }
+                "/" { send_page $sock "Dashboard" [dashboard_page] }
+                "/lists" { send_page $sock "Manage Lists" [lists_page $page] }
+                "/users" { send_page $sock "Manage Users" [users_page $page] }
+                "/channels" { send_page $sock "Manage Channels" [channels_page] }
+                "/events" { send_page $sock "Recent Events" [events_page $page] }
+                "/login" { redirect $sock "/" }
+                "/logout" { logout_handler $sock $headers }
+                "/add-entry" { if {$method eq "POST"} { process_add_entry $sock $post_data $user } else { redirect $sock "/lists" } }
+                "/remove-entry" { if {$method eq "POST"} { process_remove_entry $sock $post_data } else { redirect $sock "/lists" } }
+                "/update-access" { if {$method eq "POST"} { process_update_access $sock $post_data } else { redirect $sock "/users" } }
+                "/update-channel" { if {$method eq "POST"} { process_update_channel $sock $post_data } else { redirect $sock "/channels" } }
+                default { send_page $sock "Not Found" "<h2>404 Not Found</h2>" "404 Not Found" }
             }
         }
         
@@ -139,361 +122,142 @@ namespace eval ::arm::web {
         puts $sock "HTTP/1.0 302 Found\r\nLocation: $location\r\n\r\n"
     }
 
-    # -- UPDATED PROCEDURE --
+    proc render_pagination {path current_page total_items} {
+        variable items_per_page
+        if {$total_items <= $items_per_page} { return "" }
+        set total_pages [expr {ceil(double($total_items) / $items_per_page)}]
+        set pagination_html "<div class='pagination' style='text-align:center; margin-top: 1em;'>"
+        if {$current_page > 1} { append pagination_html "<a href='$path?page=[expr {$current_page - 1}]'>&laquo; Previous</a>" }
+        append pagination_html " <span style='margin: 0 1em;'>Page $current_page of $total_pages</span> "
+        if {$current_page < $total_pages} { append pagination_html "<a href='$path?page=[expr {$current_page + 1}]'>Next &raquo;</a>" }
+        append pagination_html "</div>"
+        return $pagination_html
+    }
+
     proc send_page {sock title body {status "200 OK"}} {
         set nav ""
         if {$title ne "Login" && $title ne "Error"} {
-            set nav {
-                <nav>
-                    <a href="/">Dashboard</a> | 
-                    <a href="/lists">Lists</a> |
-                    <a href="/users">Users</a> |
-                    <a href="/channels">Channels</a> |
-                    <a href="/events">Events</a> |
-                    <a href="/logout">Logout</a>
-                </nav>
-                <hr>
-            }
+            set nav {<nav><a href="/">Dashboard</a> | <a href="/lists">Lists</a> | <a href="/users">Users</a> | <a href="/channels">Channels</a> | <a href="/events">Events</a> | <a href="/logout">Logout</a></nav><hr>}
         }
-        # ** IMPROVEMENT: Added JavaScript for live table filtering **
-        set javascript {
-            <script>
-            function filterTable(inputId, tableId) {
-                let input, filter, table, tr, td, i, j, txtValue;
-                input = document.getElementById(inputId);
-                filter = input.value.toUpperCase();
-                table = document.getElementById(tableId);
-                tr = table.getElementsByTagName("tr");
-
-                for (i = 1; i < tr.length; i++) { // Start from 1 to skip header row
-                    let found = false;
-                    td = tr[i].getElementsByTagName("td");
-                    for (j = 0; j < td.length; j++) {
-                        if (td[j]) {
-                            txtValue = td[j].textContent || td[j].innerText;
-                            if (txtValue.toUpperCase().indexOf(filter) > -1) {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (found) {
-                        tr[i].style.display = "";
-                    } else {
-                        tr[i].style.display = "none";
-                    }
-                }
-            }
-            </script>
-        }
+        set javascript {<script>function filterTable(i,t){let e,n,l,a,d,r,c,s;for(e=document.getElementById(i),n=e.value.toUpperCase(),l=document.getElementById(t),a=l.getElementsByTagName("tr"),r=1;r<a.length;r++){let i=!1;for(d=a[r].getElementsByTagName("td"),c=0;c<d.length;c++)if(d[c]&&(s=d[c].textContent||d[c].innerText,s.toUpperCase().indexOf(n)>-1)){i=!0;break}i?a[r].style.display="":a[r].style.display="none"}}</script>}
         set html "<!DOCTYPE html><html><head><title>Armour - $title</title>$javascript<link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$nav$body</main></body></html>"
         puts $sock "HTTP/1.0 $status\r\nContent-Type: text/html\r\nContent-Length: [string length $html]\r\n\r\n$html"
     }
-
+    
     # --- ACTION HANDLERS ---
-    
-    proc process_login {sock post_data} {
-        if {[catch {
-            variable sessions
-            set form_data [dict create]
-            foreach pair [split $post_data &] {
-                lassign [split $pair =] key value
-                dict set form_data [url_decode $key] [url_decode $value]
-            }
-
-            set username ""; set password ""
-            if {[dict exists $form_data username]} { set username [dict get $form_data username] }
-            if {[dict exists $form_data password]} { set password [dict get $form_data password] }
-            
-            set authenticated 0
-            
-            if {$username ne "" && $password ne ""} {
-                foreach {uid udata} $::arm::dbusers {
-                    if {[string equal -nocase [dict get $udata user] $username]} {
-                        if {[dict get $udata pass] eq [::arm::userdb:encrypt $password]} {
-                            set authenticated 1
-                        }
-                        break
-                    }
-                }
-            }
-
-            if {$authenticated && [::arm::userdb:get:level $username *] >= [::arm::cfg:get web:level]} {
-                set session_id [::sha1::sha1 -hex "[clock clicks][clock seconds][expr {rand()}]"]
-                dict set sessions $session_id $username
-                puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=$session_id; Path=/; HttpOnly; SameSite=Strict\r\nLocation: /\r\n\r\n"
-            } else {
-                send_page $sock "Login" [login_page "Invalid credentials or insufficient access level."]
-            }
-        } error_message]} {
-            ::arm::debug 0 "\n\n\x0304FATAL LOGIN ERROR:\x03 $error_message\n$::errorInfo\n"
-            send_page $sock "Error" "<h2>500 Internal Server Error</h2><p>The server encountered an unrecoverable error while processing your request. Please check the bot's log file for details.</p>" "500 Internal Server Error"
-        }
-    }
-
-    proc logout_handler {sock headers} {
-        variable sessions
-        if {[dict exists $headers Cookie]} {
-            if {[regexp {session_id=([^; ]+)} [dict get $headers Cookie] -> session_id]} {
-                dict unset sessions $session_id
-            }
-        }
-        puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=deleted; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT\r\nLocation: /login\r\n\r\n"
-    }
-    
-    proc process_add_entry {sock post_data user} {
-        set form_data [dict create]
-        foreach pair [split $post_data &] {
-            lassign [split $pair =] key value
-            dict set form_data $key [url_decode $value]
-        }
-        
-        ::arm::db:add [string toupper [string index [dict get $form_data list] 0]] \
-            [dict get $form_data chan] [dict get $form_data method] [dict get $form_data value] \
-            "$user (web)" [dict get $form_data action] "1:1:1" [dict get $form_data reason]
-
-        redirect $sock "/lists"
-    }
-
-    proc process_remove_entry {sock post_data} {
-        lassign [split $post_data =] key id
-        ::arm::db:rem [url_decode $id]
-        redirect $sock "/lists"
-    }
-    
-    proc process_update_access {sock post_data} {
-        set form_data [dict create]
-        foreach pair [split $post_data &] {
-            lassign [split $pair =] key value
-            dict set form_data [url_decode $key] [url_decode $value]
-        }
-        set uid [dict get $form_data uid]
-        set cid [dict get $form_data cid]
-        set level [dict get $form_data level]
-
-        ::arm::db:connect
-        ::arm::db:query "UPDATE levels SET level='$level' WHERE uid='$uid' AND cid='$cid'"
-        ::arm::db:close
-        redirect $sock "/users"
-    }
-
-    proc process_update_channel {sock post_data} {
-        set form_data [dict create]
-        foreach pair [split $post_data &] {
-            lassign [split $pair =] key value
-            dict set form_data [url_decode $key] [url_decode $value]
-        }
-        set cid [dict get $form_data cid]
-        
-        ::arm::db:connect
-        foreach {setting value} [dict items $form_data] {
-            if {$setting eq "cid"} continue
-            ::arm::db:query "UPDATE settings SET value='[::arm::db:escape $value]' WHERE cid='$cid' AND setting='[::arm::db:escape $setting]'"
-            dict set $::arm::dbchans $cid $setting $value
-        }
-        ::arm::db:close
-        redirect $sock "/channels"
-    }
+    proc process_login {sock post_data} {variable sessions; if {[catch {set form_data [dict create]; foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data [url_decode $key] [url_decode $value]}; set username ""; set password ""; if {[dict exists $form_data username]} {set username [dict get $form_data username]}; if {[dict exists $form_data password]} {set password [dict get $form_data password]}; set authenticated 0; if {$username ne "" && $password ne ""} {foreach {uid udata} $::arm::dbusers {if {[string equal -nocase [dict get $udata user] $username]} {if {[dict get $udata pass] eq [::arm::userdb:encrypt $password]} {set authenticated 1}; break}}}; if {$authenticated && [::arm::userdb:get:level $username *] >= [::arm::cfg:get web:level]} {set session_id [::sha1::sha1 -hex "[clock clicks][clock seconds][expr {rand()}]"]; dict set sessions $session_id $username; puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=$session_id; Path=/; HttpOnly; SameSite=Strict\r\nLocation: /\r\n\r\n"} else {send_page $sock "Login" [login_page "Invalid credentials or insufficient access level."]}} error_message]} {::arm::debug 0 "\n\n\x0304FATAL LOGIN ERROR:\x03 $error_message\n$::errorInfo\n"; send_page $sock "Error" "<h2>500 Internal Server Error</h2><p>An error occurred.</p>" "500 Internal Server Error"}}
+    proc logout_handler {sock headers} {variable sessions; if {[dict exists $headers Cookie]} {if {[regexp {session_id=([^; ]+)} [dict get $headers Cookie] -> session_id]} {dict unset sessions $session_id}}; puts $sock "HTTP/1.0 302 Found\r\nSet-Cookie: session_id=deleted; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT\r\nLocation: /login\r\n\r\n"}
+    proc process_add_entry {sock post_data user} {set form_data [dict create]; foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data $key [url_decode $value]}; ::arm::db:add [string toupper [string index [dict get $form_data list] 0]] [dict get $form_data chan] [dict get $form_data method] [dict get $form_data value] "$user (web)" [dict get $form_data action] "1:1:1" [dict get $form_data reason]; redirect $sock "/lists"}
+    proc process_remove_entry {sock post_data} {lassign [split $post_data =] key id; ::arm::db:rem [url_decode $id]; redirect $sock "/lists"}
+    proc process_update_access {sock post_data} {set form_data [dict create]; foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data [url_decode $key] [url_decode $value]}; set uid [dict get $form_data uid]; set cid [dict get $form_data cid]; set level [dict get $form_data level]; ::arm::db:connect; ::arm::db:query "UPDATE levels SET level='$level' WHERE uid='$uid' AND cid='$cid'"; ::arm::db:close; redirect $sock "/users"}
+    proc process_update_channel {sock post_data} {set form_data [dict create]; foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data [url_decode $key] [url_decode $value]}; set cid [dict get $form_data cid]; ::arm::db:connect; foreach {setting value} [dict items $form_data] {if {$setting eq "cid"} continue; ::arm::db:query "UPDATE settings SET value='[::arm::db:escape $value]' WHERE cid='$cid' AND setting='[::arm::db:escape $setting]'"; dict set $::arm::dbchans $cid $setting $value}; ::arm::db:close; redirect $sock "/channels"}
 
     # --- PAGE GENERATORS ---
 
-    proc login_page {{error ""}} {
-        if {$error ne ""} { set error "<p style='color:red;'>$error</p>" }
-        set body "<h1>Armour Login</h1>$error<form method='POST' action='/login'><label>Username</label><input type='text' name='username' required><label>Password</label><input type='password' name='password' required><button type='submit'>Login</button></form>"
-        return $body
-    }
-
-    proc dashboard_page {} {
-        set wcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "white"}}]]
-        set bcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "black"}}]]
-
-        set body "<h1>Dashboard</h1>
-        <div class='grid'>
-            <article>
-                <h4>Bot Status</h4>
-                <ul>
-                    <li><b>Bot Name:</b> [html_escape [::arm::cfg:get botname]]</li>
-                    <li><b>Eggdrop Version:</b> [lindex $::version 0]</li>
-                    <li><b>Armour Version:</b> [::arm::cfg:get version] (rev: [::arm::cfg:get revision])</li>
-                    <li><b>Uptime:</b> [::arm::userdb:timeago $::uptime]</li>
-                </ul>
-            </article>
-            <article>
-                <h4>Database Stats</h4>
-                <ul>
-                    <li><b>Registered Users:</b> [dict size $::arm::dbusers]</li>
-                    <li><b>Managed Channels:</b> [expr {[dict size $::arm::dbchans] - 1}]</li>
-                    <li><b>Whitelist Entries:</b> $wcount</li>
-                    <li><b>Blacklist Entries:</b> $bcount</li>
-                </ul>
-            </article>
-        </div>"
-        return $body
-    }
+    proc login_page {{error ""}} {if {$error ne ""} { set error "<p style='color:red;'>$error</p>" }; return "<h1>Armour Login</h1>$error<form method='POST' action='/login'><label>Username</label><input type='text' name='username' required><label>Password</label><input type='password' name='password' required><button type='submit'>Login</button></form>"}
+    proc dashboard_page {} {set wcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "white"}}]]; set bcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "black"}}]]; return "<h1>Dashboard</h1><div class='grid'><article><h4>Bot Status</h4><ul><li><b>Bot Name:</b> [html_escape [::arm::cfg:get botname]]</li><li><b>Eggdrop Version:</b> [lindex $::version 0]</li><li><b>Armour Version:</b> [::arm::cfg:get version] (rev: [::arm::cfg:get revision])</li><li><b>Uptime:</b> [::arm::userdb:timeago $::uptime]</li></ul></article><article><h4>Database Stats</h4><ul><li><b>Registered Users:</b> [dict size $::arm::dbusers]</li><li><b>Managed Channels:</b> [expr {[dict size $::arm::dbchans] - 1}]</li><li><b>Whitelist Entries:</b> $wcount</li><li><b>Blacklist Entries:</b> $bcount</li></ul></article></div>"}
     
-    # -- UPDATED PROCEDURE --
-    proc events_page {} {
+    proc events_page {page} {
+        variable items_per_page
+        set offset [expr {($page - 1) * $items_per_page}]
+        ::arm::db:connect
+        set total_items [lindex [::arm::db:query "SELECT COUNT(*) FROM cmdlog"] 0]
+        set rows [::arm::db:query "SELECT timestamp, user, command, params, bywho FROM cmdlog ORDER BY timestamp DESC LIMIT $items_per_page OFFSET $offset"]
+        ::arm::db:close
         set body "<h1>Recent Events</h1><input type='text' id='eventFilterInput' onkeyup=\"filterTable('eventFilterInput', 'eventsTable')\" placeholder='Filter events...'>"
         append body "<table id='eventsTable'><thead><tr><th>Timestamp</th><th>User</th><th>Command</th><th>Parameters</th><th>Source</th></tr></thead><tbody>"
-        ::arm::db:connect
-        set rows [::arm::db:query "SELECT timestamp, user, command, params, bywho FROM cmdlog ORDER BY timestamp DESC LIMIT 100"]
-        ::arm::db:close
-        foreach row $rows {
-            lassign $row ts user cmd params bywho
-            append body "<tr>"
-            append body "<td>[clock format $ts -format {%Y-%m-%d %H:%M:%S}]</td>"
-            append body "<td>[html_escape $user]</td>"
-            append body "<td>[html_escape $cmd]</td>"
-            append body "<td>[html_escape $params]</td>"
-            append body "<td>[html_escape $bywho]</td>"
-            append body "</tr>\n"
-        }
+        foreach row $rows {lassign $row ts user cmd params bywho; append body "<tr><td>[clock format $ts -format {%Y-%m-%d %H:%M:%S}]</td><td>[html_escape $user]</td><td>[html_escape $cmd]</td><td>[html_escape $params]</td><td>[html_escape $bywho]</td></tr>\n"}
         append body "</tbody></table>"
+        append body [render_pagination "/events" $page $total_items]
         return $body
     }
 
-    # -- UPDATED PROCEDURE --
-    proc users_page {} {
+    proc users_page {page} {
+        variable items_per_page
+        set offset [expr {($page - 1) * $items_per_page}]
+        ::arm::db:connect
+        set total_items [lindex [::arm::db:query "SELECT COUNT(*) FROM users"] 0]
+        set users [::arm::db:query "SELECT id, user, xuser FROM users ORDER BY user LIMIT $items_per_page OFFSET $offset"]
         set body "<h1>User Management</h1><input type='text' id='userFilterInput' onkeyup=\"filterTable('userFilterInput', 'usersTable')\" placeholder='Filter users...'>"
         append body "<table id='usersTable'><thead><tr><th>User ID</th><th>Username</th><th>Account</th><th>Access Level</th><th>Action</th></tr></thead><tbody>"
-        ::arm::db:connect
-        set users [::arm::db:query "SELECT id, user, xuser FROM users ORDER BY user"]
         foreach user_row $users {
             lassign $user_row uid user xuser
-            append body "<tr><td valign='top'>$uid</td><td valign='top'>[html_escape $user]</td><td valign='top'>[html_escape $xuser]</td><td>"
+            append body "<tr><td valign='top'>$uid</td><td valign='top'>[html_escape $user]</td><td valign='top'>[html_escape $xuser]</td><td><ul>"
             set levels [::arm::db:query "SELECT cid, level FROM levels WHERE uid=$uid ORDER BY cid"]
-            append body "<ul>"
-            foreach level_row $levels {
-                lassign $level_row cid level
-                set chan_name [::arm::db:get chan channels id $cid]
-                append body "<li>[html_escape $chan_name]: <form style='display:inline-block;' action='/update-access' method='POST'><input type='hidden' name='uid' value='$uid'><input type='hidden' name='cid' value='$cid'><input type='number' name='level' value='$level' style='width: 70px;'><button class='tertiary' type='submit'>Save</button></form></li>"
-            }
-            append body "</ul></td>"
-            append body "<td valign='top'><button class='tertiary' disabled>Remove</button></td></tr>\n"
+            foreach level_row $levels {lassign $level_row cid level; set chan_name [::arm::db:get chan channels id $cid]; append body "<li>[html_escape $chan_name]: <form style='display:inline-block;' action='/update-access' method='POST'><input type='hidden' name='uid' value='$uid'><input type='hidden' name='cid' value='$cid'><input type='number' name='level' value='$level' style='width: 70px;'><button class='tertiary' type='submit'>Save</button></form></li>"}
+            append body "</ul></td><td valign='top'><button class='tertiary' disabled>Remove</button></td></tr>\n"
         }
         ::arm::db:close
         append body "</tbody></table>"
+        append body [render_pagination "/users" $page $total_items]
         return $body
     }
     
     proc channels_page {} {
         set body "<h1>Channel Management</h1>"
-        
         ::arm::db:connect
         set channels [::arm::db:query "SELECT id, chan FROM channels WHERE chan != '*' ORDER BY chan"]
         foreach chan_row $channels {
-            lassign $chan_row cid chan
-            set settings [dict create]
+            lassign $chan_row cid chan; set settings [dict create]
             set setting_rows [::arm::db:query "SELECT setting, value FROM settings WHERE cid=$cid"]
-            foreach setting_row $setting_rows {
-                lassign $setting_row key val
-                dict set settings $key $val
-            }
-            
-            append body "<form action='/update-channel' method='POST'><fieldset><legend><h3>[html_escape $chan]</h3></legend>"
-            append body "<input type='hidden' name='cid' value='$cid'>"
-
-            set current_mode ""
-            if {[dict exists $settings mode]} { set current_mode [dict get $settings mode] }
-            
-            set url_val ""
-            if {[dict exists $settings url]} { set url_val [html_escape [dict get $settings url]] }
-
-            set desc_val ""
-            if {[dict exists $settings desc]} { set desc_val [html_escape [dict get $settings desc]] }
-            
-            # Mode Setting
+            foreach setting_row $setting_rows {lassign $setting_row key val; dict set settings $key $val}
+            append body "<form action='/update-channel' method='POST'><fieldset><legend><h3>[html_escape $chan]</h3></legend><input type='hidden' name='cid' value='$cid'>"
+            set current_mode ""; if {[dict exists $settings mode]} { set current_mode [dict get $settings mode] }
+            set url_val ""; if {[dict exists $settings url]} { set url_val [html_escape [dict get $settings url]] }
+            set desc_val ""; if {[dict exists $settings desc]} { set desc_val [html_escape [dict get $settings desc]] }
             append body "<label for='mode_$cid'>Mode</label><select id='mode_$cid' name='mode'>"
-            foreach mode_option {on off secure} {
-                set selected [expr {$current_mode eq $mode_option ? "selected" : ""}]
-                append body "<option value='$mode_option' $selected>[string totitle $mode_option]</option>"
-            }
-            append body "</select>"
-            
-            # URL and Desc Settings
-            append body "<label for='url_$cid'>URL</label><input type='text' id='url_$cid' name='url' value='$url_val'>"
-            append body "<label for='desc_$cid'>Description</label><input type='text' id='desc_$cid' name='desc' value='$desc_val'>"
-            
-            append body "<button type='submit'>Update [html_escape $chan]</button></fieldset></form>"
+            foreach mode_option {on off secure} {set selected [expr {$current_mode eq $mode_option ? "selected" : ""}]; append body "<option value='$mode_option' $selected>[string totitle $mode_option]</option>"}
+            append body "</select><label for='url_$cid'>URL</label><input type='text' id='url_$cid' name='url' value='$url_val'><label for='desc_$cid'>Description</label><input type='text' id='desc_$cid' name='desc' value='$desc_val'><button type='submit'>Update [html_escape $chan]</button></fieldset></form>"
         }
         ::arm::db:close
-        
         return $body
     }
 
-    # -- UPDATED PROCEDURE --
-    proc lists_page {} {
-        set add_form {
-            <fieldset>
-                <legend><h2>Add New Entry</h2></legend>
-                <form action="/add-entry" method="POST">
-                    <div class="grid">
-                        <label for="list">List Type
-                            <select id="list" name="list" required>
-                                <option value="white">Whitelist</option>
-                                <option value="black">Blacklist</option>
-                            </select>
-                        </label>
-                        <label for="chan">Channel
-                            <input type="text" id="chan" name="chan" value="*" required>
-                        </label>
-                    </div>
-                    <div class="grid">
-                         <label for="method">Method
-                            <select id="method" name="method" required>
-                                <option value="user">user</option>
-                                <option value="host">host</option>
-                                <option value="regex">regex</option>
-                                <option value="text">text</option>
-                                <option value="country">country</option>
-                                <option value="asn">asn</option>
-                                <option value="chan">chan</option>
-                            </select>
-                        </label>
-                        <label for="action">Action
-                             <select id="action" name="action" required>
-                                <option value="A">Accept</option>
-                                <option value="V">Voice</option>
-                                <option value="O">Op</option>
-                                <option value="B">Kickban</option>
-                            </select>
-                        </label>
-                    </div>
-                    <label for="value">Value (e.g., *!*@some.host, a bad word, etc.)</label>
-                    <input type="text" id="value" name="value" required>
-                    <label for="reason">Reason</label>
-                    <input type="text" id="reason" name="reason" required>
-                    <button type="submit">Add Entry</button>
-                </form>
-            </fieldset>
-        }
+    # -- UPDATED PROCEDURE with PERFORMANCE FIX --
+    proc lists_page {page} {
+        variable items_per_page
+        set offset [expr {($page - 1) * $items_per_page}]
 
-        set body "<h1>Manage Lists</h1><input type='text' id='listFilterInput' onkeyup=\"filterTable('listFilterInput', 'whitelistTable'); filterTable('listFilterInput', 'blacklistTable');\" placeholder='Filter lists by any value...'>$add_form"
-        
-        append body "<h2>Whitelist</h2><table id='whitelistTable'><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
+        # --- OPTIMIZATION: Filter and sort the complete list of IDs only once ---
+        set all_white_ids [list]
+        set all_black_ids [list]
         foreach id [lsort -integer [dict keys $::arm::entries]] {
-            dict with ::arm::entries $id { 
-                if {$type eq "white"} { 
-                    append body "<tr>"
-                    append body "<td>$id</td><td>[html_escape $chan]</td><td>[html_escape $method]</td><td>[html_escape $value]</td><td>[::arm::list:action $id]</td><td>[html_escape $reason]</td>"
-                    append body "<td><form action='/remove-entry' method='POST'><input type='hidden' name='id' value='$id'><button class='tertiary' type='submit'>Remove</button></form></td>"
-                    append body "</tr>\n" 
-                } 
+            set type [dict get $::arm::entries $id type]
+            if {$type eq "white"} {
+                lappend all_white_ids $id
+            } elseif {$type eq "black"} {
+                lappend all_black_ids $id
             }
         }
+        # --- End Optimization ---
+
+        set add_form {<fieldset><legend><h2>Add New Entry</h2></legend><form action="/add-entry" method="POST"><div class="grid"><label for="list">List Type<select id="list" name="list" required><option value="white">Whitelist</option><option value="black">Blacklist</option></select></label><label for="chan">Channel<input type="text" id="chan" name="chan" value="*" required></label></div><div class="grid"><label for="method">Method<select id="method" name="method" required><option value="user">user</option><option value="host">host</option><option value="regex">regex</option><option value="text">text</option><option value="country">country</option><option value="asn">asn</option><option value="chan">chan</option></select></label><label for="action">Action<select id="action" name="action" required><option value="A">Accept</option><option value="V">Voice</option><option value="O">Op</option><option value="B">Kickban</option></select></label></div><label for="value">Value</label><input type="text" id="value" name="value" required><label for="reason">Reason</label><input type="text" id="reason" name="reason" required><button type="submit">Add Entry</button></form></fieldset>}
+        set body "<h1>Manage Lists</h1><input type='text' id='listFilterInput' onkeyup=\"filterTable('listFilterInput', 'whitelistTable'); filterTable('listFilterInput', 'blacklistTable');\" placeholder='Filter lists by any value...'>$add_form"
         
-        append body "</tbody></table><h2>Blacklist</h2><table id='blacklistTable'><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
-        foreach id [lsort -integer [dict keys $::arm::entries]] {
+        # Whitelist Table
+        set total_white [llength $all_white_ids]
+        set paged_white_ids [lrange $all_white_ids $offset [expr {$offset + $items_per_page - 1}]]
+        append body "<h2>Whitelist</h2><table id='whitelistTable'><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
+        foreach id $paged_white_ids {
             dict with ::arm::entries $id { 
-                if {$type eq "black"} { 
-                    append body "<tr>"
-                    append body "<td>$id</td><td>[html_escape $chan]</td><td>[html_escape $method]</td><td>[html_escape $value]</td><td>[::arm::list:action $id]</td><td>[html_escape $reason]</td>"
-                    append body "<td><form action='/remove-entry' method='POST'><input type='hidden' name='id' value='$id'><button class='tertiary' type='submit'>Remove</button></form></td>"
-                    append body "</tr>\n"
-                } 
+                append body "<tr><td>$id</td><td>[html_escape $chan]</td><td>[html_escape $method]</td><td>[html_escape $value]</td><td>[::arm::list:action $id]</td><td>[html_escape $reason]</td><td><form action='/remove-entry' method='POST'><input type='hidden' name='id' value='$id'><button class='tertiary' type='submit'>Remove</button></form></td></tr>\n" 
             }
         }
         append body "</tbody></table>"
+        append body [render_pagination "/lists" $page $total_white]
+
+        # Blacklist Table
+        set total_black [llength $all_black_ids]
+        set paged_black_ids [lrange $all_black_ids $offset [expr {$offset + $items_per_page - 1}]]
+        append body "<h2>Blacklist</h2><table id='blacklistTable'><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
+        foreach id $paged_black_ids {
+            dict with ::arm::entries $id { 
+                append body "<tr><td>$id</td><td>[html_escape $chan]</td><td>[html_escape $method]</td><td>[html_escape $value]</td><td>[::arm::list:action $id]</td><td>[html_escape $reason]</td><td><form action='/remove-entry' method='POST'><input type='hidden' name='id' value='$id'><button class='tertiary' type='submit'>Remove</button></form></td></tr>\n"
+            }
+        }
+        append body "</tbody></table>"
+        append body [render_pagination "/lists" $page $total_black]
+
         return $body
     }
 }
