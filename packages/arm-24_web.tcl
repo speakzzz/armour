@@ -1,4 +1,5 @@
-# armour/packages/arm-24_web.tcl - An enhanced, self-contained web interface for Armour (Final Version)
+# armour/packages/arm-24_web.tcl - An enhanced, self-contained web interface for Armour
+# This version includes UI/UX improvements for live table filtering.
 
 namespace eval ::arm::web {
 
@@ -138,6 +139,7 @@ namespace eval ::arm::web {
         puts $sock "HTTP/1.0 302 Found\r\nLocation: $location\r\n\r\n"
     }
 
+    # -- UPDATED PROCEDURE --
     proc send_page {sock title body {status "200 OK"}} {
         set nav ""
         if {$title ne "Login" && $title ne "Error"} {
@@ -153,7 +155,38 @@ namespace eval ::arm::web {
                 <hr>
             }
         }
-        set html "<!DOCTYPE html><html><head><title>Armour - $title</title><link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$nav$body</main></body></html>"
+        # ** IMPROVEMENT: Added JavaScript for live table filtering **
+        set javascript {
+            <script>
+            function filterTable(inputId, tableId) {
+                let input, filter, table, tr, td, i, j, txtValue;
+                input = document.getElementById(inputId);
+                filter = input.value.toUpperCase();
+                table = document.getElementById(tableId);
+                tr = table.getElementsByTagName("tr");
+
+                for (i = 1; i < tr.length; i++) { // Start from 1 to skip header row
+                    let found = false;
+                    td = tr[i].getElementsByTagName("td");
+                    for (j = 0; j < td.length; j++) {
+                        if (td[j]) {
+                            txtValue = td[j].textContent || td[j].innerText;
+                            if (txtValue.toUpperCase().indexOf(filter) > -1) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (found) {
+                        tr[i].style.display = "";
+                    } else {
+                        tr[i].style.display = "none";
+                    }
+                }
+            }
+            </script>
+        }
+        set html "<!DOCTYPE html><html><head><title>Armour - $title</title>$javascript<link rel='stylesheet' href='https://unpkg.com/simpledotcss/simple.min.css'></head><body><main>$nav$body</main></body></html>"
         puts $sock "HTTP/1.0 $status\r\nContent-Type: text/html\r\nContent-Length: [string length $html]\r\n\r\n$html"
     }
 
@@ -297,12 +330,13 @@ namespace eval ::arm::web {
         </div>"
         return $body
     }
-
+    
+    # -- UPDATED PROCEDURE --
     proc events_page {} {
-        set body "<h1>Recent Events</h1>"
-        append body "<table><thead><tr><th>Timestamp</th><th>User</th><th>Command</th><th>Parameters</th><th>Source</th></tr></thead><tbody>"
+        set body "<h1>Recent Events</h1><input type='text' id='eventFilterInput' onkeyup=\"filterTable('eventFilterInput', 'eventsTable')\" placeholder='Filter events...'>"
+        append body "<table id='eventsTable'><thead><tr><th>Timestamp</th><th>User</th><th>Command</th><th>Parameters</th><th>Source</th></tr></thead><tbody>"
         ::arm::db:connect
-        set rows [::arm::db:query "SELECT timestamp, user, command, params, bywho FROM cmdlog ORDER BY timestamp DESC LIMIT 25"]
+        set rows [::arm::db:query "SELECT timestamp, user, command, params, bywho FROM cmdlog ORDER BY timestamp DESC LIMIT 100"]
         ::arm::db:close
         foreach row $rows {
             lassign $row ts user cmd params bywho
@@ -318,9 +352,10 @@ namespace eval ::arm::web {
         return $body
     }
 
+    # -- UPDATED PROCEDURE --
     proc users_page {} {
-        set body "<h1>User Management</h1>"
-        append body "<table><thead><tr><th>User ID</th><th>Username</th><th>Account</th><th>Access Level</th><th>Action</th></tr></thead><tbody>"
+        set body "<h1>User Management</h1><input type='text' id='userFilterInput' onkeyup=\"filterTable('userFilterInput', 'usersTable')\" placeholder='Filter users...'>"
+        append body "<table id='usersTable'><thead><tr><th>User ID</th><th>Username</th><th>Account</th><th>Access Level</th><th>Action</th></tr></thead><tbody>"
         ::arm::db:connect
         set users [::arm::db:query "SELECT id, user, xuser FROM users ORDER BY user"]
         foreach user_row $users {
@@ -341,9 +376,6 @@ namespace eval ::arm::web {
         return $body
     }
     
-    # ***************************************************************
-    # ** THIS IS THE MODIFIED PROCEDURE WITH THE FIX **
-    # ***************************************************************
     proc channels_page {} {
         set body "<h1>Channel Management</h1>"
         
@@ -361,7 +393,6 @@ namespace eval ::arm::web {
             append body "<form action='/update-channel' method='POST'><fieldset><legend><h3>[html_escape $chan]</h3></legend>"
             append body "<input type='hidden' name='cid' value='$cid'>"
 
-            # ** FIX: Check if keys exist before trying to access them **
             set current_mode ""
             if {[dict exists $settings mode]} { set current_mode [dict get $settings mode] }
             
@@ -390,6 +421,7 @@ namespace eval ::arm::web {
         return $body
     }
 
+    # -- UPDATED PROCEDURE --
     proc lists_page {} {
         set add_form {
             <fieldset>
@@ -436,8 +468,9 @@ namespace eval ::arm::web {
             </fieldset>
         }
 
-        set body "<h1>Manage Lists</h1>$add_form"
-        append body "<h2>Whitelist</h2><table><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
+        set body "<h1>Manage Lists</h1><input type='text' id='listFilterInput' onkeyup=\"filterTable('listFilterInput', 'whitelistTable'); filterTable('listFilterInput', 'blacklistTable');\" placeholder='Filter lists by any value...'>$add_form"
+        
+        append body "<h2>Whitelist</h2><table id='whitelistTable'><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
         foreach id [lsort -integer [dict keys $::arm::entries]] {
             dict with ::arm::entries $id { 
                 if {$type eq "white"} { 
@@ -448,7 +481,8 @@ namespace eval ::arm::web {
                 } 
             }
         }
-        append body "</tbody></table><h2>Blacklist</h2><table><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
+        
+        append body "</tbody></table><h2>Blacklist</h2><table id='blacklistTable'><thead><tr><th>ID</th><th>Chan</th><th>Method</th><th>Value</th><th>Action</th><th>Reason</th><th></th></tr></thead><tbody>"
         foreach id [lsort -integer [dict keys $::arm::entries]] {
             dict with ::arm::entries $id { 
                 if {$type eq "black"} { 
