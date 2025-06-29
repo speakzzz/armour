@@ -9,14 +9,26 @@ namespace eval ::arm::web {
     # --- CORE SERVER PROCEDURES ---
 
     proc start_server {} {
-        if {![::arm::cfg:get web:enable]} { return }
-        set port [::arm::cfg:get web:port]
-        if {[catch {socket -server ::arm::web::accept $port} sock]} {
-            ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Could not open server socket on port $port. Error: $sock"
-            return
-        }
-        ::arm::debug 0 "\[@\] Armour: Starting web interface on port $port"
+    if {![::arm::cfg:get web:enable]} { return }
+    
+    # Get the port and the new bind IP from the config
+    set port [::arm::cfg:get web:port]
+    set bind_ip [::arm::cfg:get web:bind]
+
+    # Default to 0.0.0.0 if the setting is not present in the user's config
+    if {$bind_ip eq ""} {
+        set bind_ip "0.0.0.0"
     }
+
+    # Use the -myaddr option to specify which IP to bind to
+    if {[catch {socket -server ::arm::web::accept -myaddr $bind_ip $port} sock]} {
+        ::arm::debug 0 "\[@\] Armour: \x0304(error)\x03 Could not open server socket on $bind_ip port $port. Error: $sock"
+        return
+    }
+    
+    # Update the log message to show the bind IP
+    ::arm::debug 0 "\[@\] Armour: Starting web interface on $bind_ip port $port"
+}
 
     proc accept {sock addr p} {
         variable sessions
