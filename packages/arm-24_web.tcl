@@ -1,9 +1,8 @@
 # armour/packages/arm-24_web.tcl - An enhanced, self-contained web interface for Armour
-# This version includes a fix for the channel settings save logic.
+# This version includes Full User Management features.
 
 namespace eval ::arm::web {
 
-    # This dictionary will store our active sessions: {session_id -> username}
     variable sessions [dict create]
     variable items_per_page 25
 
@@ -50,6 +49,7 @@ namespace eval ::arm::web {
         if {$user eq ""} {
             if {$path eq "/login"} { if {$method eq "POST"} { process_login $sock $post_data } else { send_page $sock "Login" [login_page] } } else { redirect $sock "/login" }
         } else {
+            # ** IMPROVEMENT: Added new routes for user management **
             switch -exact -- $path {
                 "/" { send_page $sock "Dashboard" [dashboard_page] }
                 "/lists" { send_page $sock "Manage Lists" [lists_page $page] }
@@ -62,6 +62,9 @@ namespace eval ::arm::web {
                 "/remove-entry" { if {$method eq "POST"} { process_remove_entry $sock $post_data } else { redirect $sock "/lists" } }
                 "/update-access" { if {$method eq "POST"} { process_update_access $sock $post_data } else { redirect $sock "/users" } }
                 "/update-channel" { if {$method eq "POST"} { process_update_channel $sock $post_data } else { redirect $sock "/channels" } }
+                "/update-user" { if {$method eq "POST"} { process_update_user $sock $post_data } else { redirect $sock "/users" } }
+                "/reset-password" { if {$method eq "POST"} { process_reset_password $sock $post_data $user } else { redirect $sock "/users" } }
+                "/delete-user" { if {$method eq "POST"} { process_delete_user $sock $post_data } else { redirect $sock "/users" } }
                 default { send_page $sock "Not Found" "<h2>404 Not Found</h2>" "404 Not Found" }
             }
         }
@@ -83,39 +86,53 @@ namespace eval ::arm::web {
     proc process_add_entry {sock post_data user} {set form_data [dict create]; foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data $key [url_decode $value]}; ::arm::db:add [string toupper [string index [dict get $form_data list] 0]] [dict get $form_data chan] [dict get $form_data method] [dict get $form_data value] "$user (web)" [dict get $form_data action] "1:1:1" [dict get $form_data reason]; redirect $sock "/lists"}
     proc process_remove_entry {sock post_data} {lassign [split $post_data =] key id; ::arm::db:rem [url_decode $id]; redirect $sock "/lists"}
     proc process_update_access {sock post_data} {set form_data [dict create]; foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data [url_decode $key] [url_decode $value]}; set uid [dict get $form_data uid]; set cid [dict get $form_data cid]; set level [dict get $form_data level]; ::arm::db:connect; ::arm::db:query "UPDATE levels SET level='$level' WHERE uid='$uid' AND cid='$cid'"; ::arm::db:close; redirect $sock "/users"}
-    
-    # -- UPDATED PROCEDURE --
-    proc process_update_channel {sock post_data} {
+    proc process_update_channel {sock post_data} {set form_data [dict create]; foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data [url_decode $key] [url_decode $value]}; set cid [dict get $form_data cid]; ::arm::db:connect; foreach setting [dict keys $form_data] {set value [dict get $form_data $setting]; if {$setting eq "cid"} continue; set existing_value [lindex [::arm::db:query "SELECT value FROM settings WHERE cid='$cid' AND setting='[::arm::db:escape $setting]'"] 0]; if {$existing_value eq ""} {::arm::db:query "INSERT INTO settings (cid, setting, value) VALUES ('$cid', '[::arm::db:escape $setting]', '[::arm::db:escape $value]')" } else {::arm::db:query "UPDATE settings SET value='[::arm::db:escape $value]' WHERE cid='$cid' AND setting='[::arm::db:escape $setting]'"}; dict set $::arm::dbchans $cid $setting $value}; ::arm::db:close; redirect $sock "/channels"}
+
+    # ** NEW ACTION HANDLERS **
+    proc process_update_user {sock post_data} {
         set form_data [dict create]
-        foreach pair [split $post_data &] {
-            lassign [split $pair =] key value
-            dict set form_data [url_decode $key] [url_decode $value]
-        }
-        set cid [dict get $form_data cid]
-        
+        foreach pair [split $post_data &] {lassign [split $pair =] key value; dict set form_data [url_decode $key] [url_decode $value]}
+        set uid [dict get $form_data uid]
         ::arm::db:connect
-        foreach setting [dict keys $form_data] {
-            if {$setting eq "cid"} continue
-            set value [dict get $form_data $setting]
-
-            # --- UPSERT LOGIC ---
-            # Check if the setting already exists for this channel
-            set existing_value [lindex [::arm::db:query "SELECT value FROM settings WHERE cid='$cid' AND setting='[::arm::db:escape $setting]'"] 0]
-
-            if {$existing_value eq ""} {
-                # Setting does not exist, so INSERT it.
-                ::arm::db:query "INSERT INTO settings (cid, setting, value) VALUES ('$cid', '[::arm::db:escape $setting]', '[::arm::db:escape $value]')"
-            } else {
-                # Setting exists, so UPDATE it.
-                ::arm::db:query "UPDATE settings SET value='[::arm::db:escape $value]' WHERE cid='$cid' AND setting='[::arm::db:escape $setting]'"
+        # Update basic user info
+        ::arm::db:query "UPDATE users SET email='[::arm::db:escape [dict get $form_data email]]', languages='[::arm::db:escape [dict get $form_data languages]]' WHERE id=$uid"
+        # Upsert greetings
+        foreach key [dict keys $form_data] {
+            if {[string match "greet_*" $key]} {
+                set cid [lindex [split $key "_"] 1]
+                set greet_val [::arm::db:escape [dict get $form_data $key]]
+                set exists [lindex [::arm::db:query "SELECT greet FROM greets WHERE uid=$uid AND cid=$cid"] 0]
+                if {$exists eq ""} {
+                    if {$greet_val ne ""} { ::arm::db:query "INSERT INTO greets (cid, uid, greet) VALUES ($cid, $uid, '$greet_val')" }
+                } else {
+                    if {$greet_val eq ""} { ::arm::db:query "DELETE FROM greets WHERE uid=$uid AND cid=$cid" } else { ::arm::db:query "UPDATE greets SET greet='$greet_val' WHERE uid=$uid AND cid=$cid" }
+                }
             }
-            # --- END UPSERT LOGIC ---
-
-            # Update the in-memory cache as well
-            dict set $::arm::dbchans $cid $setting $value
         }
         ::arm::db:close
-        redirect $sock "/channels"
+        redirect $sock "/users"
+    }
+
+    proc process_reset_password {sock post_data admin_user} {
+        set uid [lindex [split [lindex [split $post_data &] 0] =] 1]
+        set new_pass [::arm::randpass]
+        set enc_pass [::arm::userdb:encrypt $new_pass]
+        set target_user [::arm::db:get user users id $uid]
+        ::arm::userdb:user:set pass $enc_pass id $uid
+        # Send a note to the admin who performed the action
+        set admin_uid [::arm::db:get id users user $admin_user]
+        set note "Password for user '$target_user' (UID: $uid) has been reset. New password is: $new_pass"
+        ::arm::db:connect
+        ::arm::db:query "INSERT INTO notes (timestamp, from_u, from_id, to_u, to_id, read, note) VALUES ('[clock seconds]', 'Armour', '0', '$admin_user', '$admin_uid', 'N', '[::arm::db:escape $note]')"
+        ::arm::db:close
+        redirect $sock "/users"
+    }
+
+    proc process_delete_user {sock post_data} {
+        set uid [lindex [split [lindex [split $post_data &] 0] =] 1]
+        set target_user [::arm::db:get user users id $uid]
+        ::arm::userdb:deluser $target_user $uid
+        redirect $sock "/users"
     }
 
     # --- PAGE GENERATORS ---
@@ -123,7 +140,57 @@ namespace eval ::arm::web {
     proc login_page {{error ""}} {if {$error ne ""} { set error "<p style='color:red;'>$error</p>" }; return "<h1>Armour Login</h1>$error<form method='POST' action='/login'><label>Username</label><input type='text' name='username' required><label>Password</label><input type='password' name='password' required><button type='submit'>Login</button></form>"}
     proc dashboard_page {} {set wcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "white"}}]]; set bcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "black"}}]]; return "<h1>Dashboard</h1><div class='grid'><article><h4>Bot Status</h4><ul><li><b>Bot Name:</b> [html_escape [::arm::cfg:get botname]]</li><li><b>Eggdrop Version:</b> [lindex $::version 0]</li><li><b>Armour Version:</b> [::arm::cfg:get version] (rev: [::arm::cfg:get revision])</li><li><b>Uptime:</b> [::arm::userdb:timeago $::uptime]</li></ul></article><article><h4>Database Stats</h4><ul><li><b>Registered Users:</b> [dict size $::arm::dbusers]</li><li><b>Managed Channels:</b> [expr {[dict size $::arm::dbchans] - 1}]</li><li><b>Whitelist Entries:</b> $wcount</li><li><b>Blacklist Entries:</b> $bcount</li></ul></article></div>"}
     proc events_page {page} {variable items_per_page; set offset [expr {($page - 1) * $items_per_page}]; ::arm::db:connect; set total_items [lindex [::arm::db:query "SELECT COUNT(*) FROM cmdlog"] 0]; set rows [::arm::db:query "SELECT timestamp, user, command, params, bywho FROM cmdlog ORDER BY timestamp DESC LIMIT $items_per_page OFFSET $offset"]; ::arm::db:close; set body "<h1>Recent Events</h1><input type='text' id='eventFilterInput' onkeyup=\"filterTable('eventFilterInput', 'eventsTable')\" placeholder='Filter events...'>"; append body "<table id='eventsTable'><thead><tr><th>Timestamp</th><th>User</th><th>Command</th><th>Parameters</th><th>Source</th></tr></thead><tbody>"; foreach row $rows {lassign $row ts user cmd params bywho; append body "<tr><td>[clock format $ts -format {%Y-%m-%d %H:%M:%S}]</td><td>[html_escape $user]</td><td>[html_escape $cmd]</td><td>[html_escape $params]</td><td>[html_escape $bywho]</td></tr>\n"}; append body "</tbody></table>"; append body [render_pagination "/events" $page $total_items]; return $body}
-    proc users_page {page} {variable items_per_page; set offset [expr {($page - 1) * $items_per_page}]; ::arm::db:connect; set total_items [lindex [::arm::db:query "SELECT COUNT(*) FROM users"] 0]; set users [::arm::db:query "SELECT id, user, xuser FROM users ORDER BY user LIMIT $items_per_page OFFSET $offset"]; set body "<h1>User Management</h1><input type='text' id='userFilterInput' onkeyup=\"filterTable('userFilterInput', 'usersTable')\" placeholder='Filter users...'>"; append body "<table id='usersTable'><thead><tr><th>User ID</th><th>Username</th><th>Account</th><th>Access Level</th><th>Action</th></tr></thead><tbody>"; foreach user_row $users { lassign $user_row uid user xuser; append body "<tr><td valign='top'>$uid</td><td valign='top'>[html_escape $user]</td><td valign='top'>[html_escape $xuser]</td><td><ul>"; set levels [::arm::db:query "SELECT cid, level FROM levels WHERE uid=$uid ORDER BY cid"]; foreach level_row $levels {lassign $level_row cid level; set chan_name [::arm::db:get chan channels id $cid]; append body "<li>[html_escape $chan_name]: <form style='display:inline-block;' action='/update-access' method='POST'><input type='hidden' name='uid' value='$uid'><input type='hidden' name='cid' value='$cid'><input type='number' name='level' value='$level' style='width: 70px;'><button class='tertiary' type='submit'>Save</button></form></li>"}; append body "</ul></td><td valign='top'><button class='tertiary' disabled>Remove</button></td></tr>\n"}; ::arm::db:close; append body "</tbody></table>"; append body [render_pagination "/users" $page $total_items]; return $body}
+    
+    # -- UPDATED PROCEDURE --
+    proc users_page {page} {
+        variable items_per_page
+        set offset [expr {($page - 1) * $items_per_page}]
+        ::arm::db:connect
+        set total_items [lindex [::arm::db:query "SELECT COUNT(*) FROM users"] 0]
+        set users [::arm::db:query "SELECT id, user, xuser, email, languages FROM users ORDER BY user LIMIT $items_per_page OFFSET $offset"]
+        set body "<h1>User Management</h1><input type='text' id='userFilterInput' onkeyup=\"filterTable('userFilterInput', 'usersTable')\" placeholder='Filter users...'>"
+        append body "<table id='usersTable'><thead><tr><th>User Details</th></tr></thead><tbody>"
+        foreach user_row $users {
+            lassign $user_row uid user xuser email languages
+            append body "<tr><td><details><summary><b>$user</b> (Account: [expr {$xuser eq "" ? "<i>none</i>" : [html_escape $xuser]}], UID: $uid)</summary>"
+            
+            # Main user edit form
+            append body "<form action='/update-user' method='POST' style='margin-top: 1em; border-left: 2px solid #ccc; padding-left: 1em;'>"
+            append body "<input type='hidden' name='uid' value='$uid'>"
+            append body "<h4>User Settings</h4>"
+            append body "<div class='grid'><div><label>Email</label><input type='email' name='email' value='[html_escape $email]'></div>"
+            append body "<div><label>Languages</label><input type='text' name='languages' placeholder='EN, FR' value='[html_escape $languages]'></div></div>"
+
+            # Per-channel settings
+            append body "<h4>Channel-Specific Settings</h4>"
+            set levels [::arm::db:query "SELECT cid, level FROM levels WHERE uid=$uid ORDER BY cid"]
+            append body "<table><thead><tr><th>Channel</th><th>Access Level</th><th>On-Join Greeting</th></tr></thead><tbody>"
+            foreach level_row $levels {
+                lassign $level_row cid level
+                set chan_name [::arm::db:get chan channels id $cid]
+                set greet [lindex [::arm::db:query "SELECT greet FROM greets WHERE uid=$uid AND cid=$cid"] 0]
+                append body "<tr>"
+                append body "<td><b>[html_escape $chan_name]</b></td>"
+                append body "<td><form style='display:inline-block; margin:0;' action='/update-access' method='POST'><input type='hidden' name='uid' value='$uid'><input type='hidden' name='cid' value='$cid'><input type='number' name='level' value='$level' style='width: 70px;'><button class='tertiary' type='submit'>Save</button></form></td>"
+                append body "<td><input type='text' name='greet_${cid}' value='[html_escape $greet]'></td>"
+                append body "</tr>"
+            }
+            append body "</tbody></table>"
+            append body "<button type='submit'>Save All User Changes</button></form>"
+
+            # Destructive actions
+            append body "<hr><h4>Destructive Actions</h4><div class='grid'>"
+            append body "<div><form action='/reset-password' method='POST' onsubmit=\"return confirm('Are you sure you want to reset this user\\'s password? A note with the new password will be sent to you.');\"><input type='hidden' name='uid' value='$uid'><button class='secondary' type='submit'>Reset Password</button></form></div>"
+            append body "<div><form action='/delete-user' method='POST' onsubmit=\"return confirm('DANGER: Are you absolutely sure you want to permanently delete this user and all their access?');\"><input type='hidden' name='uid' value='$uid'><button class='secondary' style='background-color:#c82333; border-color:#c82333;' type='submit'>Delete User</button></form></div>"
+            append body "</div>"
+
+            append body "</details></td></tr>"
+        }
+        ::arm::db:close
+        append body "</tbody></table>"
+        append body [render_pagination "/users" $page $total_items]
+        return $body
+    }
 
     proc channels_page {} {
         set body "<h1>Channel Management</h1>"
@@ -139,24 +206,18 @@ namespace eval ::arm::web {
             set url_val ""; if {[dict exists $settings url]} { set url_val [html_escape [dict get $settings url]] }
             set desc_val ""; if {[dict exists $settings desc]} { set desc_val [html_escape [dict get $settings desc]] }
             set kicklock_val ""; if {[dict exists $settings kicklock]} { set kicklock_val [dict get $settings kicklock] }
-            append body "<div class='grid'>"
-            append body "<div><label for='mode_$cid'>Mode</label><select id='mode_$cid' name='mode'>"
+            append body "<div class='grid'><div><label for='mode_$cid'>Mode</label><select id='mode_$cid' name='mode'>"
             foreach mode_option {on off secure} {set selected [expr {$current_mode eq $mode_option ? "selected" : ""}]; append body "<option value='$mode_option' $selected>[string totitle $mode_option]</option>"}
-            append body "</select></div>"
-            append body "<div><label for='kicklock_$cid'>Kick-Lock <small>(kicks:mins:+modes:duration)</small></label><input type='text' id='kicklock_$cid' name='kicklock' placeholder='e.g., 3:5:+r:30' value='$kicklock_val'></div></div>"
-            append body "<label for='url_$cid'>URL</label><input type='text' id='url_$cid' name='url' value='$url_val'>"
-            append body "<label for='desc_$cid'>Description</label><input type='text' id='desc_$cid' name='desc' value='$desc_val'>"
+            append body "</select></div><div><label for='kicklock_$cid'>Kick-Lock <small>(kicks:mins:+modes:duration)</small></label><input type='text' id='kicklock_$cid' name='kicklock' placeholder='e.g., 3:5:+r:30' value='$kicklock_val'></div></div>"
+            append body "<label for='url_$cid'>URL</label><input type='text' id='url_$cid' name='url' value='$url_val'><label for='desc_$cid'>Description</label><input type='text' id='desc_$cid' name='desc' value='$desc_val'>"
             append body "<h4>Toggles</h4><div class='grid'>"
             foreach setting $toggle_settings {
                 set current_val "off"
                 if {[dict exists $settings $setting] && [dict get $settings $setting] eq "on"} { set current_val "on" }
                 append body "<div><label for='${setting}_$cid'>[string totitle $setting]</label><select id='${setting}_$cid' name='$setting'>"
-                append body "<option value='on' [expr {$current_val eq "on" ? "selected" : ""}]>On</option>"
-                append body "<option value='off' [expr {$current_val eq "off" ? "selected" : ""}]>Off</option>"
-                append body "</select></div>"
+                append body "<option value='on' [expr {$current_val eq "on" ? "selected" : ""}]>On</option><option value='off' [expr {$current_val eq "off" ? "selected" : ""}]>Off</option></select></div>"
             }
-            append body "</div>"
-            append body "<button type='submit'>Update [html_escape $chan]</button></fieldset></form>"
+            append body "</div><button type='submit'>Update [html_escape $chan]</button></fieldset></form>"
         }
         ::arm::db:close
         return $body
