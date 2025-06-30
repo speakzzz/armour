@@ -32,7 +32,7 @@ namespace eval ::arm::web {
     bind cron - "*/5 * * * *" ::arm::web::update_list_counts_coro
     
     # And run it once now asynchronously to initialize the cache without blocking startup.
-    coroexec ::arm::web::update_list_counts 0 0 0 0 0
+    ::arm::coroexec ::arm::web::update_list_counts 0 0 0 0 0
     # --- END: Asynchronous Caching Optimization ---
 
     # --- CORE SERVER PROCEDURES ---
