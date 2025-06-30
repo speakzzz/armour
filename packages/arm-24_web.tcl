@@ -25,7 +25,7 @@ namespace eval ::arm::web {
     # This wrapper procedure is what the cron bind will call.
     # It immediately launches the real work in a coroutine so the bot does not block.
     proc update_list_counts_coro {minute hour day month weekday} {
-        coroexec ::arm::web::update_list_counts $minute $hour $day $month $weekday
+        ::arm::coroexec ::arm::web::update_list_counts $minute $hour $day $month $weekday
     }
 
     # Run the update procedure every 5 minutes, using the non-blocking coroutine wrapper.
