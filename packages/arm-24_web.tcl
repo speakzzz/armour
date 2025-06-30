@@ -5,6 +5,27 @@ namespace eval ::arm::web {
 
     variable sessions [dict create]
     variable items_per_page 25
+    
+    # --- START: Caching Optimization ---
+    variable wcount_cache 0
+    variable bcount_cache 0
+
+    proc update_list_counts {} {
+        variable wcount_cache
+        variable bcount_cache
+        
+        # This is the expensive operation
+        set wcount_cache [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "white"}}]]
+        set bcount_cache [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "black"}}]]
+        
+        ::arm::debug 4 "\[@\] Armour Web: Updated list counts cache (W: $wcount_cache, B: $bcount_cache)."
+    }
+
+    # Run the update procedure every 5 minutes
+    bind cron - "*/5 * * * *" ::arm::web::update_list_counts
+    # And run it once now to initialize the cache
+    update_list_counts
+    # --- END: Caching Optimization ---
 
     # --- CORE SERVER PROCEDURES ---
 
@@ -158,7 +179,13 @@ namespace eval ::arm::web {
     # --- PAGE GENERATORS ---
 
     proc login_page {{error ""}} {if {$error ne ""} { set error "<p style='color:red;'>$error</p>" }; return "<h1>Armour Login</h1>$error<form method='POST' action='/login'><label>Username</label><input type='text' name='username' required><label>Password</label><input type='password' name='password' required><button type='submit'>Login</button></form>"}
-    proc dashboard_page {} {set wcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "white"}}]]; set bcount [dict size [dict filter $::arm::entries script {id data} {expr {[dict get $data type] eq "black"}}]]; return "<h1>Dashboard</h1><div class='grid'><article><h4>Bot Status</h4><ul><li><b>Bot Name:</b> [html_escape [::arm::cfg:get botname]]</li><li><b>Eggdrop Version:</b> [lindex $::version 0]</li><li><b>Armour Version:</b> [::arm::cfg:get version] (rev: [::arm::cfg:get revision])</li><li><b>Uptime:</b> [::arm::userdb:timeago $::uptime]</li></ul></article><article><h4>Database Stats</h4><ul><li><b>Registered Users:</b> [dict size $::arm::dbusers]</li><li><b>Managed Channels:</b> [expr {[dict size $::arm::dbchans] - 1}]</li><li><b>Whitelist Entries:</b> $wcount</li><li><b>Blacklist Entries:</b> $bcount</li></ul></article></div>"}
+    
+    proc dashboard_page {} {
+        variable wcount_cache
+        variable bcount_cache
+        return "<h1>Dashboard</h1><div class='grid'><article><h4>Bot Status</h4><ul><li><b>Bot Name:</b> [html_escape [::arm::cfg:get botname]]</li><li><b>Eggdrop Version:</b> [lindex $::version 0]</li><li><b>Armour Version:</b> [::arm::cfg:get version] (rev: [::arm::cfg:get revision])</li><li><b>Uptime:</b> [::arm::userdb:timeago $::uptime]</li></ul></article><article><h4>Database Stats</h4><ul><li><b>Registered Users:</b> [dict size $::arm::dbusers]</li><li><b>Managed Channels:</b> [expr {[dict size $::arm::dbchans] - 1}]</li><li><b>Whitelist Entries:</b> $wcount_cache</li><li><b>Blacklist Entries:</b> $bcount_cache</li></ul></article></div>"
+    }
+
     proc events_page {page} {variable items_per_page; set offset [expr {($page - 1) * $items_per_page}]; ::arm::db:connect; set total_items [lindex [::arm::db:query "SELECT COUNT(*) FROM cmdlog"] 0]; set rows [::arm::db:query "SELECT timestamp, user, command, params, bywho FROM cmdlog ORDER BY timestamp DESC LIMIT $items_per_page OFFSET $offset"]; ::arm::db:close; set body "<h1>Recent Events</h1><input type='text' id='eventFilterInput' onkeyup=\"filterTable('eventFilterInput', 'eventsTable')\" placeholder='Filter events...'>"; append body "<table id='eventsTable'><thead><tr><th>Timestamp</th><th>User</th><th>Command</th><th>Parameters</th><th>Source</th></tr></thead><tbody>"; foreach row $rows {lassign $row ts user cmd params bywho; append body "<tr><td>[clock format $ts -format {%Y-%m-%d %H:%M:%S}]</td><td>[html_escape $user]</td><td>[html_escape $cmd]</td><td>[html_escape $params]</td><td>[html_escape $bywho]</td></tr>\n"}; append body "</tbody></table>"; append body [render_pagination "/events" $page $total_items]; return $body}
     
     proc users_page {page query_params} {
