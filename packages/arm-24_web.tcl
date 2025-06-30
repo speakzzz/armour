@@ -6,10 +6,11 @@ namespace eval ::arm::web {
     variable sessions [dict create]
     variable items_per_page 25
     
-    # --- START: Caching Optimization ---
+    # --- START: Asynchronous Caching Optimization ---
     variable wcount_cache 0
     variable bcount_cache 0
 
+    # This procedure does the actual work. It will be run inside a coroutine.
     proc update_list_counts {minute hour day month weekday} {
         variable wcount_cache
         variable bcount_cache
@@ -21,11 +22,18 @@ namespace eval ::arm::web {
         ::arm::debug 4 "\[@\] Armour Web: Updated list counts cache (W: $wcount_cache, B: $bcount_cache)."
     }
 
-    # Run the update procedure every 5 minutes
-    bind cron - "*/5 * * * *" ::arm::web::update_list_counts
-    # And run it once now to initialize the cache
-    update_list_counts
-    # --- END: Caching Optimization ---
+    # This wrapper procedure is what the cron bind will call.
+    # It immediately launches the real work in a coroutine so the bot does not block.
+    proc update_list_counts_coro {minute hour day month weekday} {
+        coroexec ::arm::web::update_list_counts $minute $hour $day $month $weekday
+    }
+
+    # Run the update procedure every 5 minutes, using the non-blocking coroutine wrapper.
+    bind cron - "*/5 * * * *" ::arm::web::update_list_counts_coro
+    
+    # And run it once now asynchronously to initialize the cache without blocking startup.
+    coroexec ::arm::web::update_list_counts 0 0 0 0 0
+    # --- END: Asynchronous Caching Optimization ---
 
     # --- CORE SERVER PROCEDURES ---
 
