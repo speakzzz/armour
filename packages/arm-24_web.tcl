@@ -10,7 +10,7 @@ namespace eval ::arm::web {
     variable wcount_cache 0
     variable bcount_cache 0
 
-    proc update_list_counts {} {
+    proc update_list_counts {minute hour day month weekday} {
         variable wcount_cache
         variable bcount_cache
         
