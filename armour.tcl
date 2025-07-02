@@ -9759,6 +9759,14 @@ proc raw:kick:lock {nick uhost handle chan vict reason} {
     set klsetting [dict get $dbchans $cid kicklock]
     if {$klsetting eq "" || $klsetting eq "off"} { return; }; # -- safety net (kicklock off)
 
+    # --- START of FIX ---
+    # Add validation to prevent crashes from malformed settings in the database.
+    if {![regexp {^\d+:\d+:\+[A-Za-z]+:\d+$} $klsetting]} {
+        debug 0 "\002(KICKLOCK ERROR)\002 Malformed kicklock setting for channel \002$chan\002. Value is '\002$klsetting\002', but expected format is 'kicks:mins:+modes:duration' (e.g., '3:5:+r:30'). Please correct it using the 'modchan' command."
+        return;
+    }
+    # --- END of FIX ---
+
     incr kicklock($chan); # -- increase counter
 
     lassign [split $klsetting :] kicks mins modes actmins
