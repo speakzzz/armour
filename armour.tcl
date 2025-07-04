@@ -17559,24 +17559,30 @@ proc report {type target string {chan ""} {chanops "1"}} {
     } elseif {$chan eq ""} { set chan $prichan }
 
     set rchan [cfg:get chan:report $chan]
+
+    # Get the report method from the config. Default to NOTICE if not set.
+    set report_method [string toupper [cfg:get report:method $chan]]
+    if {$report_method ne "PRIVMSG"} {
+        set report_method "NOTICE"
+    }
     
     if {$type eq "white"} {
         if {[cfg:get notc:white $chan]} { putquick "NOTICE $target :$string"}
         if {[cfg:get opnotc:white $chan]} { putquick "NOTICE @$chan :$string"}
-        if {[cfg:get dnotc:white $chan] && $rchan ne ""} { putquick "NOTICE $rchan :$string"}
+        if {[cfg:get dnotc:white $chan] && $rchan ne ""} { putquick "$report_method $rchan :$string"}
     } elseif {$type eq "black"} {
         if {[cfg:get notc:black $chan]} { putquick "NOTICE $target :$string" }
         if {$chanops && ([cfg:get opnotc:black $chan] || [get:val chan:mode $chan] eq "secure")} { putquick "NOTICE @$chan :$string" }
-        if {([cfg:get dnotc:black $chan] || [get:val chan:mode $chan] eq "secure") && $rchan ne ""} { putquick "NOTICE $rchan :$string" }
+        if {([cfg:get dnotc:black $chan] || [get:val chan:mode $chan] eq "secure") && $rchan ne ""} { putquick "$report_method $rchan :$string" }    
     } elseif {$type eq "text"} {
         if {[cfg:get opnotc:text $chan]} { putquick "NOTICE @$chan :$string" }
-        if {[cfg:get dnotc:text $chan] && $rchan ne ""} { putquick "NOTICE $rchan :$string" }
+        if {[cfg:get dnotc:text $chan] && $rchan ne ""} { putquick "$report_method $rchan :$string" }
     } elseif {$type eq "operop"} {
         if {[cfg:get opnotc:operop $chan]} { putquick "NOTICE @$chan :$string" }
-        if {[cfg:get dnotc:operop $chan] && $rchan ne ""} { putquick "NOTICE $rchan :$string" }
+        if {[cfg:get dnotc:operop $chan] && $rchan ne ""} { putquick "$report_method $rchan :$string" }
     } elseif {$type eq "debug"} {
-        if {$rchan ne ""} { putquick "NOTICE $rchan :$string" }
-    }
+        if {$rchan ne ""} { putquick "$report_method $rchan :$string" }
+	}
 }
 
 
