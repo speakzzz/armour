@@ -816,6 +816,9 @@ set cfg(opnotc:operop) 1
 # -- send op notices for blacklist text warnings? (0|1) - [1]
 set cfg(opnotc:text) 1
 
+# -- method to send debug channel reports (notice|privmsg) - [notice]
+set cfg(report:method) "privmsg"
+
 # -- send debug chan notices for whitelist entries? (0|1) - [1]
 set cfg(dnotc:white) 1
 
