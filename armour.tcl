@@ -13252,7 +13252,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock"
     
     # -- optional settings based on plugins
-    set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0;
+    set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0; set plugin(weather) 0;
     if {[info commands quote:cron] ne ""} { set plugin(quote) 1; append setlist " quote quoterand" }; # -- quote
     if {[info commands arm:cmd:tweet] ne ""} { set plugin(twitter) 1; append setlist " tweet tweetquote" }; # -- tweet
     if {[info commands ask:query] ne ""} { set plugin(openai) 1; append setlist " openai image imagerand" }; # -- openai
