@@ -15,6 +15,7 @@ bind pubm - * { arm::coroexec arm::seen:raw:speak }
 bind mode - * { arm::coroexec arm::seen:raw:mode }
 bind topc - * { arm::coroexec arm::seen:raw:topic }
 
+set addcmd(seen) { seen 0 pub msg dcc }
 # -- the main command
 proc seen:cmd:seen {0 1 2 3 {4 ""} {5 ""}} {
     global botnick
