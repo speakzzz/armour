@@ -20,10 +20,9 @@ package require http 2
 package require tls 1.7
 
 # -- shortcut
-proc arm:cmd:w {0 1 2 3 {4 ""} {5 ""}} { arm:cmd:weather $0 $1 $2 $3 $4 $5 }
-
+proc weather:cmd:w {0 1 2 3 {4 ""} {5 ""}} { coroexec weather:cmd:weather $0 $1 $2 $3 $4 $5 }
 # -- cmd: weather
-proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
+proc weather:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
     variable dbchans
     variable weatherLoop
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
