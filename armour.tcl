@@ -18846,7 +18846,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
 
     } elseif {$action eq "branches" || $action eq "b"} {
         # -- list available branches
-        lassign [update:github "https://api.github.com/repos/empus/armour/branches" "get branches" $type $target] success extra json
+        lassign [update:github "https://api.github.com/repos/speakzzz/armour/branches" "get branches" $type $target] success extra json
         if {!$success} { return; }; # -- error
         set count 0
         foreach branch $json {
@@ -18860,7 +18860,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
             set author [dict get $scommit author]
             #set aname [dict get $author name]
             set commitdate [dict get $author date]
-            reply $type $target "\002branch:\002 $bname -- \002url:\002 https://github.com/empus/armour/tree/$bname --\
+            reply $type $target "\002branch:\002 $bname -- \002url:\002 https://github.com/speakzzz/armour/tree/$bname --\
                 \002commit:\002 [userdb:timeago [clock scan $commitdate]] ago"
         }
         if {$count > 1} {
@@ -18868,7 +18868,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
         } 
     } elseif {$action eq "info"} {
         # -- list available branches
-        lassign [update:github "https://api.github.com/repos/empus/armour/branches/$branch" "get branch info" $type $target] success extra json
+        lassign [update:github "https://api.github.com/repos/speakzzz/armour/branches/$branch" "get branch info" $type $target] success extra json
         if {!$success} { reply $type $target "error."; return; }; # -- error
 
         set bname [dict get $json name]
@@ -18882,7 +18882,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
         set commitdate [dict get $author date]
         if {$branch ne $cfgbranch} { set xtra "$branch" } else { set xtra "" }
         reply $type $target "\002branch:\002 $bname -- \002message:\002 $commitmsg -- \002commit:\002 [userdb:timeago [clock scan $commitdate]] ago\
-             -- \002url:\002 https://github.com/empus/armour/commit/$sha -- \002usage:\002 update install $xtra"
+             -- \002url:\002 https://github.com/speakzzz/armour/commit/$sha -- \002usage:\002 update install $xtra"
     } 
 
     # -- create log entry for command use
@@ -18929,7 +18929,7 @@ proc update:check {branch {debug "0"} {mode ""}} {
     if {$branch eq ""} { set branch "master" }
 
     debug 0 "\002update:check:\002 checking for updates -- branch: $branch -- debug: $debug"
-    set url "https://raw.githubusercontent.com/empus/armour/${branch}/.version"
+    set url "https://raw.githubusercontent.com/speakzzz/armour/${branch}/.version"
     http::register https 443 [list ::tls::socket -tls1.2 true -autoservername true]
     http::config -useragent "mozilla" 
     set errcode [catch {set tok [::http::geturl $url -timeout 10000]} error]
@@ -19140,7 +19140,7 @@ proc update:download {ghdata} {
     exec echo $start > ./armour/backup/.lock
 
     # -- download the script from github
-    ::github::github update empus armour ./armour/backup/armour-$start $arm::github(token) $branch
+    ::github::github update speakzzz armour ./armour/backup/armour-$start $arm::github(token) $branch
 
     # -- wait for the download to complete
     # TODO: consider doing this with total bytes instead of number of files (see: update:dirsize proc)
