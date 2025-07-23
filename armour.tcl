@@ -13839,6 +13839,8 @@ proc userdb:cmd:deluser {0 1 2 3 {4 ""}  {5 ""}} {
     # -- if user has multiple channel accesses; conditions must be met in all
     
     set allow 1;
+    set global_deleter_level [db:get level levels uid $uid cid 1]
+    if {$global_deleter_level < 500} {
     db:connect
     set rows [db:query "SELECT cid,level FROM levels WHERE uid=$tuid"]
     foreach row $rows {
@@ -13847,6 +13849,7 @@ proc userdb:cmd:deluser {0 1 2 3 {4 ""}  {5 ""}} {
         set deleterlvl [db:get level levels cid $cid uid $uid]
         if {$targetlvl >= $deleterlvl} { set allow 0; break; }; # -- target has equal or higher access! disallow deletion
     }
+}
     if {!$allow} {
         # -- deletion disallowed
         reply $type $target "nope. user is out of your reach."
