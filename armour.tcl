@@ -13640,7 +13640,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
         reply $type $target "registered user $tuser (\002uid:\002 $userid \002account:\002 $xuser)"
     } else {
         reply $type $target "registered user $tuser. check /notice for temporary password \002(\002uid:\002 $userid\002)\002"
-        reply notc $target "temporary password is '$newpass' -- to change, do /msg $botnick newpass <newpassword>"
+        reply notc $target "Your temporary password is '$newpass'. Please login with \002/msg $botnick login $tuser $newpass\002, then change it using \002/msg $botnick newpass <newpassword>\002"
     }
 
     # -- send a note to managers?
@@ -13667,7 +13667,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
             db:close
             if {$online} {
                 putquick "NOTICE $mgrnick :(\002note\002 from $tuser -- \002id:\002 $rowid): $note"
-                debug 0 "userdb:cmd:adduser: notified $mgruser ($mgrnick![getchanhost $mgrnick]) that $nick!$uh registered user: $usernames"
+                debug 0 "userdb:cmd:adduser: notified $mgruser ($mgrnick![getchanhost $mgrnick]) that $nick!$uh registered user: $tuser"
             }
         }
     }
