@@ -19,6 +19,10 @@ package require json
 package require http 2
 package require tls 1.7
 
+# -- register command with Armour's command handler
+set addcmd(weather) { weather 1 pub msg dcc }
+set addcmd(w)       { weather 1 pub msg dcc }
+
 # -- shortcut
 proc weather:cmd:w {0 1 2 3 {4 ""} {5 ""}} { coroexec weather:cmd:weather $0 $1 $2 $3 $4 $5 }
 # -- cmd: weather
