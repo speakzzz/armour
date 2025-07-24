@@ -112,13 +112,13 @@ proc weather:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
 		debug 0 "\002cmd:cmd:weather:\002 HTTP Error: $code"
         if {$ncode eq 404} {
             # -- city not found
-            if {[regexp -- {^(.*)\s([A-Za-z]{2})$} $city -> loc iso] && $weatherLoop < 1} {
+            if {[regexp -- {^([^,]+),?\s+([A-Za-z]{2})$} $city -> loc iso] && $weatherLoop < 1} {
                 # -- try reformat to "city, country"
                 incr weatherLoop
                 switch -- $type {
-                    pub { arm:cmd:weather $0 $1 $2 $3 $4 "$loc, $iso" }
-                    msg { arm:cmd:weather $0 $1 $2 $3 "$loc, $iso" }
-                    dcc { arm:cmd:weather $0 $1 $2 "$loc, $iso" }
+                    pub { arm::weather:cmd:weather $0 $1 $2 $3 $4 "$loc,$iso,US" }
+                    msg { arm::weather:cmd:weather $0 $1 $2 $3 "$loc,$iso,US" }
+                    dcc { arm::weather:cmd:weather $0 $1 $2 "$loc,$iso,US" }
                 }
             } else {
                 set city [string totitle $city]
