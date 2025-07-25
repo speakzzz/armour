@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025072400"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025072500"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -13244,12 +13244,13 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     elseif {$ttype eq "trivia"} { set ttype "trivia"; set plug "trivia" } \
     elseif {$ttype eq "vote"} { set ttype "vote"; set plug "vote" } \
     elseif {$ttype eq "weather"} { set ttype "weather"; set plug "weather" } \
+    elseif {$ttype eq "weathergov"} { set ttype "weathergov"; set plug "weathergov" } \
     elseif {$ttype eq "seen"} { set ttype "seen"; set plug "seen" } \
     elseif {$ttype eq "humour"} { set ttype "humour"; set plug "humour" } \
     elseif {$ttype eq "ninjas"} { set ttype "ninjas"; set plug "ninjas" } \
     else { set usage 1 }
 
-    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock"
+    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock weathergov"
     
     # -- optional settings based on plugins
     set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0; set plugin(weather) 0;
@@ -13263,6 +13264,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     if {[info commands trivia:query] ne ""} { set plugin(trivia) 1; append setlist " trivia" }; # -- trivia
     if {[info commands vote:nick] ne ""} { set plugin(vote) 1; append setlist " vote" }; # -- vote
     if {[info commands weather:emoji] ne ""} { set plugin(weather) 1; append setlist " weather" }; # -- weather
+    if {[info commands weathergov:cmd:weathergov] ne ""} { set plugin(weathergov) 1; append setlist " weathergov" }
     if {[info commands seen:insert] ne ""} { set plugin(seen) 1; append setlist " seen" }; # -- seen
     if {[info commands humour:cmd] ne ""} { set plugin(humour) 1; append setlist " humour" }; # -- humour
     if {[info commands ninjas:cmd] ne ""} { set plugin(ninjas) 1; append setlist " ninjas" }; # -- ninjas
