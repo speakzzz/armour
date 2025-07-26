@@ -17,8 +17,8 @@ package require http 2
 package require tls 1.7
 
 # -- Register the commands with Armour's command handler
-set addcmd(weathergov)     { weathergov 1 pub msg dcc }
-set addcmd(weathergov_ver) { weathergov 1 pub msg dcc }
+set addcmd(climate)     { climate 1 pub msg dcc }
+set addcmd(climate_ver) { climate 1 pub msg dcc }
 
 # --- DIAGNOSTIC COMMAND ---
 proc weathergov:cmd:weathergov_ver {0 1 2 3 {4 ""} {5 ""}} {
