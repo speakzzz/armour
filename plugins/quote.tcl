@@ -22,7 +22,6 @@
 #		- implement timeago locally (to work in standalone)
 #
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 
@@ -917,6 +916,3 @@ quote:db:query "CREATE TABLE IF NOT EXISTS quotes (\
 quote:db:close
 
 putlog "\[@\] Armour: loaded plugin: quote"
-
-}
-# -- end of namespace

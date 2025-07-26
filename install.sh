@@ -28,7 +28,7 @@
 
 
 ARMOUR_VER="v5.0"
-ARMOUR_GIT="https://github.com/empus/armour -b v5_0"
+ARMOUR_GIT="https://github.com/speakzzz/armour -b speakz-armour"
 EGGDROP_VER="1.9.5"
 EGGDROP_URL="https://ftp.eggheads.org/pub/eggdrop/source/1.9/eggdrop-1.9.5.tar.gz"
 

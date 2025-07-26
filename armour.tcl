@@ -1032,8 +1032,8 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2024110200"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
-set cfg(version) "v5.0";        # -- script version
+set cfg(revision) "2025072500"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 
@@ -2348,42 +2348,37 @@ proc cidr:match {ip cidr} {
     return [expr {[string range $ipBin 0 [expr {$prefix - 1}]] eq [string range $netBin 0 [expr {$prefix - 1}]]}]
 }
 
-# Helper function to convert IPv6 to a binary string representation
-# This is a complex task in pure Tcl. A simplified version is shown.
-# A robust solution would need to properly expand "::" and handle all cases.
-proc ipv6_to_binary {ipv6} {
-    # This is a non-trivial conversion. For a real implementation, a known-good
-    # library or a more robust procedure would be necessary.
-    # The following is a conceptual representation.
-    catch {
-        # Expand "::"
-        set double_colon [string first "::" $ipv6]
-        if {$double_colon != -1} {
-            set parts [split $ipv6 "::"]
-            set left_parts [split [lindex $parts 0] ":"]
-            set right_parts [split [lindex $parts 1] ":"]
-            if {[lindex $left_parts 0] eq ""} { set left_parts {} }
-            if {[lindex $right_parts 0] eq ""} { set right_parts {} }
-            set missing [string repeat ":0" [expr {8 - [llength $left_parts] - [llength $right_parts]}]]
-            set ipv6 "[join $left_parts ":"]$missing:[join $right_parts ":"]"
-            if {[string first ":" $ipv6] == 0} { set ipv6 [string range $ipv6 1 end] }
+# FINAL CORRECTED VERSION
+proc ipv6_to_binary {ipv6_addr} {
+    set expanded_addr $ipv6_addr
+    # Check for and expand "::" notation
+    if {[string first "::" $expanded_addr] != -1} {
+        set num_colons [expr {[string length [regsub -all {[^:]} $expanded_addr ""]]}]
+        set num_to_add [expr {7 - $num_colons}]
+        set replacement_str ":"
+        for {set i 0} {$i < $num_to_add} {incr i} {
+            append replacement_str "0:"
         }
-        
-        set binary_str ""
-        foreach group [split $ipv6 ":"] {
-            set bin [binary format H* "0000$group"]
-            binary scan $bin B* b
-            append binary_str [string range $b end-15 end]
-        }
-        return $binary_str
+        set expanded_addr [regsub -- "::" $expanded_addr $replacement_str]
+        # Handle edge cases like :: at the beginning or end
+        if {[string index $expanded_addr 0] eq ":"} { set expanded_addr "0$expanded_addr" }
+        if {[string index $expanded_addr end] eq ":"} { set expanded_addr "${expanded_addr}0" }
     }
-    return "" ;# Return empty on error
+
+    # Build the final 128-bit binary string
+    set binary_str ""
+    foreach group [split $expanded_addr ":"] {
+        if {$group eq ""} { set group "0" }
+        set decimal "0x$group"
+        set bin [format %016b $decimal]
+        append binary_str $bin
+    }
+    return $binary_str
 }
 
 putlog "\[@\] Armour: loaded CIDR matching procedure."
 }
 # -- end namespace
-
 
 
 # ------------------------------------------------------------------------------------------------
@@ -3613,11 +3608,6 @@ proc bot:send:dnsbl {bot cmd text} {
     set start [clock clicks]
     lassign $text nick ident host ip chan
 
-    if {[string match "*:*" $ip]} {
-        # -- don't continue if IPv6 (TODO)
-        debug 0 "bot:send:dnsbl: (from: $bot) -- halting scan for IPv6 dnsbl IP (ip: $ip)"
-        return;
-    }
     debug 1 "bot:send:dnsbl: (from: $bot) -- scanning for dnsbl match: $ip (host: $host)"
     # -- get score
     set response [rbl:score $ip]
@@ -9007,7 +8997,7 @@ proc raw:genwho {server cmd arg} {
         # -- IRCnet/EFnet
         #server    cmd    mynick type ident host server nick away :hopcount sid rname
         #irc.psychz.net    352    cori * _mxl    ipv4.pl    ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick type chan ident host server nick flags hopcount sid
+        lassign $arg mynick chan ident host server nick flags hopcount sid
         set rname [lrange $arg 10 end]
         # -- NOTE: the above raw example doesn't appear to provide an actual IP; do a DNS lookup (doh! this slows us down)
         if {![isValidIP $host]} {
@@ -9769,6 +9759,14 @@ proc raw:kick:lock {nick uhost handle chan vict reason} {
     set klsetting [dict get $dbchans $cid kicklock]
     if {$klsetting eq "" || $klsetting eq "off"} { return; }; # -- safety net (kicklock off)
 
+    # --- START of FIX ---
+    # Add validation to prevent crashes from malformed settings in the database.
+    if {![regexp {^\d+:\d+:\+[A-Za-z]+:\d+$} $klsetting]} {
+        debug 0 "\002(KICKLOCK ERROR)\002 Malformed kicklock setting for channel \002$chan\002. Value is '\002$klsetting\002', but expected format is 'kicks:mins:+modes:duration' (e.g., '3:5:+r:30'). Please correct it using the 'modchan' command."
+        return;
+    }
+    # --- END of FIX ---
+
     incr kicklock($chan); # -- increase counter
 
     lassign [split $klsetting :] kicks mins modes actmins
@@ -9969,7 +9967,7 @@ proc scan {nick chan full clicks ident ip host xuser rname} {
     } else { set dnsbl $dnsbl }
     
     # -- turn off dnsbl & port scans if umode +x or service
-    if {$ip eq "127.0.0.1" || $ip eq "0::"} { set dnsbl 0; set portscan 0; set ipscan 0 }
+    if {$ip eq "127.0.0.1" || $ip eq "0::" || ($ip eq "0" && ![isValidIP $host])} { set dnsbl 0; set portscan 0; set ipscan 0 }
     
     # -- turn off dnsbl & port scans if rfc1918 ip space
     if { [cidr:match $ip "10.0.0.0/8"]     } { set dnsbl 0; set ipscan 0; set portscan 0 } \
@@ -13246,15 +13244,16 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     elseif {$ttype eq "trivia"} { set ttype "trivia"; set plug "trivia" } \
     elseif {$ttype eq "vote"} { set ttype "vote"; set plug "vote" } \
     elseif {$ttype eq "weather"} { set ttype "weather"; set plug "weather" } \
+    elseif {$ttype eq "weathergov"} { set ttype "weathergov"; set plug "weathergov" } \
     elseif {$ttype eq "seen"} { set ttype "seen"; set plug "seen" } \
     elseif {$ttype eq "humour"} { set ttype "humour"; set plug "humour" } \
     elseif {$ttype eq "ninjas"} { set ttype "ninjas"; set plug "ninjas" } \
     else { set usage 1 }
 
-    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock"
+    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock weathergov"
     
     # -- optional settings based on plugins
-    set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0;
+    set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0; set plugin(weather) 0;
     if {[info commands quote:cron] ne ""} { set plugin(quote) 1; append setlist " quote quoterand" }; # -- quote
     if {[info commands arm:cmd:tweet] ne ""} { set plugin(twitter) 1; append setlist " tweet tweetquote" }; # -- tweet
     if {[info commands ask:query] ne ""} { set plugin(openai) 1; append setlist " openai image imagerand" }; # -- openai
@@ -13265,6 +13264,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     if {[info commands trivia:query] ne ""} { set plugin(trivia) 1; append setlist " trivia" }; # -- trivia
     if {[info commands vote:nick] ne ""} { set plugin(vote) 1; append setlist " vote" }; # -- vote
     if {[info commands weather:emoji] ne ""} { set plugin(weather) 1; append setlist " weather" }; # -- weather
+    if {[info commands weathergov:cmd:weathergov] ne ""} { set plugin(weathergov) 1; append setlist " weathergov" }
     if {[info commands seen:insert] ne ""} { set plugin(seen) 1; append setlist " seen" }; # -- seen
     if {[info commands humour:cmd] ne ""} { set plugin(humour) 1; append setlist " humour" }; # -- humour
     if {[info commands ninjas:cmd] ne ""} { set plugin(ninjas) 1; append setlist " ninjas" }; # -- ninjas
@@ -13642,7 +13642,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
         reply $type $target "registered user $tuser (\002uid:\002 $userid \002account:\002 $xuser)"
     } else {
         reply $type $target "registered user $tuser. check /notice for temporary password \002(\002uid:\002 $userid\002)\002"
-        reply notc $target "temporary password is '$newpass' -- to change, do /msg $botnick newpass <newpassword>"
+        reply notc $target "Your temporary password is '$newpass'. Please login with \002/msg $botnick login $tuser $newpass\002, then change it using \002/msg $botnick newpass <newpassword>\002"
     }
 
     # -- send a note to managers?
@@ -13669,7 +13669,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
             db:close
             if {$online} {
                 putquick "NOTICE $mgrnick :(\002note\002 from $tuser -- \002id:\002 $rowid): $note"
-                debug 0 "userdb:cmd:adduser: notified $mgruser ($mgrnick![getchanhost $mgrnick]) that $nick!$uh registered user: $usernames"
+                debug 0 "userdb:cmd:adduser: notified $mgruser ($mgrnick![getchanhost $mgrnick]) that $nick!$uh registered user: $tuser"
             }
         }
     }
@@ -13690,7 +13690,7 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
     
     # -- ensure user has required access for command
     lassign [db:get id,user users curnick $nick] uid user
-    if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
+    if {![userdb:isAllowed $nick $cmd $chan $type]} { return; };
     # -- end default proc template
 
     set params [llength $arg]
@@ -13722,13 +13722,10 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
     }
     
     if {$globlvl ne ""} {
-        # -- check if valid
         if {![regexp -- {^\d+} $globlvl]} {
             reply $type $target "\002(\002error\002)\002 global access level must be 1-500."
             return;
         }
-
-        # -- check they have the access
         set sgloblvl [db:get level levels uid $uid cid 1]
         if {$sgloblvl eq ""} { set sgloblvl 0 }
         if {$globlvl >= $sgloblvl} {
@@ -13736,39 +13733,36 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
             return;
         }
     } else {
-        set globlvl [cfg:get register:level $chan]; # -- default newuser global level
+        set globlvl [cfg:get register:level $chan]; 
     }; 
     
-    # -- valid username?
     if {![regexp -- {^[A-Za-z0-9_]{1,15}$} $trguser]} {
         reply $type $target "\002(\002error\002)\002 bogus username. (1-15 alphanumeric chars only)";
         return;
     }
 
-    # -- check if target user exists
     if {[userdb:isValiduser $trguser]} {
         reply $type $target "\002(\002error\002)\002 [userdb:user:get user user $trguser] already exists";
         return;
     }
     
-    # -- reserved usernames 
-    # -- helps with internal bot stats recollection (cmd: report)
     if {[string tolower $trguser] eq "bot" || [string tolower $trguser] eq "usernames" || [string tolower $trguser] eq [string tolower ${botnet-nick}] \
         || [string tolower $trguser] eq [string tolower $botnick] || [string tolower $trguser] eq $::uservar} { 
         reply $type $target "\002(\002error\002)\002 reserved username.";
         return;
     }
 
-    # -- check level
     if {![userdb:isInteger $globlvl]} { reply $type $target "valid levels: 1-500"; return; }
     set level [userdb:get:level $user *]
     if {$globlvl >= $level} { reply $type $target "error: cannot add a user with a level equal to or above your own."; return; }
     
-    # -- check it xuser is already assigned to a user
-    set xuser [userdb:user:get xuser xuser $trgxuser]
-    if {$xuser ne ""} {
-        reply $type $target "\002error:\002 network account \002$xuser\002 is already associated with user: \002[userdb:user:get user xuser $xuser]\002";
-        return;
+    # ** FIX: Only check for existing xuser if one was provided **
+    if {$trgxuser ne ""} {
+        set xuser [userdb:user:get xuser xuser $trgxuser]
+        if {$xuser ne ""} {
+            reply $type $target "\002error:\002 network account \002$xuser\002 is already associated with user: \002[userdb:user:get user xuser $xuser]\002";
+            return;
+        }
     }
 
     # -- add the user
@@ -13780,17 +13774,18 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
     db:query "INSERT INTO users (user,xuser,pass,register_ts,register_by) VALUES ('$db_user', '$db_xuser', '$encpass','$reg_ts','$reg_by')"
     set userid [db:last:rowid]
 
-    # -- store in dbusers dict
-    dict set dbusers $userid [list user $trguser account $trgxuser pass $encpass register_ts $reg_ts register_by $reg_by \
+    # ** FIX: Use 'dict create' instead of 'list' to create a valid sub-dictionary **
+    dict set dbusers $userid [dict create user $trguser account $trgxuser pass $encpass register_ts $reg_ts register_by $reg_by \
         email "" languages "" curnick "" curhost "" lastnick "" lasthost "" lastseen ""]
+
     if {$globlvl eq 0} {
         set globlvl "none"
     } else {
-        # -- add global access
         set added_ts [unixtime]
         db:query "INSERT INTO levels (cid,uid,level,added_ts,added_bywho,modif_ts,modif_bywho) \
-            VALUES (1,$userid,$globlvl,$added_ts,$uid,$added_ts,$uid)"
+            VALUES (1,$userid,$globlvl,$added_ts,'$reg_by',$added_ts,'$reg_by')"
     }
+    db:close
             
     debug 1 "userdb:cmd:newuser: created user: $trguser (id: $userid -- xuser: $trgxuser -- level: $globlvl)"
     
@@ -13801,12 +13796,10 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
         reply notc $nick "\002note:\002 temporary password for user \002$trguser\002 is: $genpass"
     }
     
-    # -- attempt autologin via /WHO on xuser
     if {$trgxuser ne ""} {
         putquick "WHO $trgxuser a%nuhiat,101"
     }
     
-    # -- create log entry for command use
     log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
 }
 
@@ -13848,6 +13841,8 @@ proc userdb:cmd:deluser {0 1 2 3 {4 ""}  {5 ""}} {
     # -- if user has multiple channel accesses; conditions must be met in all
     
     set allow 1;
+    set global_deleter_level [db:get level levels uid $uid cid 1]
+    if {$global_deleter_level < 500} {
     db:connect
     set rows [db:query "SELECT cid,level FROM levels WHERE uid=$tuid"]
     foreach row $rows {
@@ -13856,6 +13851,7 @@ proc userdb:cmd:deluser {0 1 2 3 {4 ""}  {5 ""}} {
         set deleterlvl [db:get level levels cid $cid uid $uid]
         if {$targetlvl >= $deleterlvl} { set allow 0; break; }; # -- target has equal or higher access! disallow deletion
     }
+}
     if {!$allow} {
         # -- deletion disallowed
         reply $type $target "nope. user is out of your reach."
@@ -15339,7 +15335,7 @@ proc userdb:raw:genwho {server cmd arg} {
     } elseif {$ircd eq "2"} {      
         # -- IRCnet
         #irc.psychz.net 352 cori * _mxl ipv4.pl ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick type ident host server nick away hopcount sid
+        lassign $arg mynick ident host server nick away hopcount sid
         set rname [lrange $arg 9 end]
         # -- NOTE:  The above raw example doesn't appear to provide an actual IP;
         # --        A DNS lookup would slow us down; be doubled up from real scans; and isn't needed for autologin
@@ -16033,17 +16029,24 @@ proc isValidIP {ip} {
     return 0
 }
 
-# -- checks if IP is localhost or rfc1918
-# -- avoid IPv6 and hostnames
+# -- checks if IP is localhost or rfc1918/private (supports IPv4 and IPv6)
 proc ip:isLocal {ip} {
-    if {$ip eq "0::"} { return 1; }
-    if {[string match "*:*" $ip] eq 1} { return 0; }; # -- cidr:match will fail on IPv6
-    if {![regexp -- {^\d+\.\d+\.\d+\.\d+} $ip]} { return 0; }; # -- must be IPv4; ensure this is not a hostname
-    if {$ip eq "127.0.0.1"} { return 1; }
+    # Check if the address is IPv6
+    if {[string first ":" $ip] != -1} {
+        if {[cidr:match $ip "::1/128"]} { return 1 }      ;# Loopback
+        if {[cidr:match $ip "fe80::/10"]} { return 1 }     ;# Link-Local
+        if {[cidr:match $ip "fc00::/7"]} { return 1 }      ;# Unique Local Address
+        return 0; # It's a public IPv6 address
+    }
+
+    # Fallback to IPv4 checks
+    if {![regexp {^\d+\.\d+\.\d+\.\d+} $ip]} { return 0; }; # Not a valid IPv4 format
+    if {$ip eq "127.0.0.1"} { return 1 }
     if {[cidr:match $ip "10.0.0.0/8"]     } { return 1 }
     if {[cidr:match $ip "172.16.0.0/12"]  } { return 1 }
     if {[cidr:match $ip "192.168.0.0/16"] } { return 1 }
-    return 0;
+
+    return 0; # It's a public IPv4 address
 }
 
 putlog "\[@\] Armour: loaded asynchronous dns resolver."
@@ -17561,24 +17564,30 @@ proc report {type target string {chan ""} {chanops "1"}} {
     } elseif {$chan eq ""} { set chan $prichan }
 
     set rchan [cfg:get chan:report $chan]
+
+    # Get the report method from the config. Default to NOTICE if not set.
+    set report_method [string toupper [cfg:get report:method $chan]]
+    if {$report_method ne "PRIVMSG"} {
+        set report_method "NOTICE"
+    }
     
     if {$type eq "white"} {
         if {[cfg:get notc:white $chan]} { putquick "NOTICE $target :$string"}
         if {[cfg:get opnotc:white $chan]} { putquick "NOTICE @$chan :$string"}
-        if {[cfg:get dnotc:white $chan] && $rchan ne ""} { putquick "NOTICE $rchan :$string"}
+        if {[cfg:get dnotc:white $chan] && $rchan ne ""} { putquick "$report_method $rchan :$string"}
     } elseif {$type eq "black"} {
         if {[cfg:get notc:black $chan]} { putquick "NOTICE $target :$string" }
         if {$chanops && ([cfg:get opnotc:black $chan] || [get:val chan:mode $chan] eq "secure")} { putquick "NOTICE @$chan :$string" }
-        if {([cfg:get dnotc:black $chan] || [get:val chan:mode $chan] eq "secure") && $rchan ne ""} { putquick "NOTICE $rchan :$string" }
+        if {([cfg:get dnotc:black $chan] || [get:val chan:mode $chan] eq "secure") && $rchan ne ""} { putquick "$report_method $rchan :$string" }    
     } elseif {$type eq "text"} {
         if {[cfg:get opnotc:text $chan]} { putquick "NOTICE @$chan :$string" }
-        if {[cfg:get dnotc:text $chan] && $rchan ne ""} { putquick "NOTICE $rchan :$string" }
+        if {[cfg:get dnotc:text $chan] && $rchan ne ""} { putquick "$report_method $rchan :$string" }
     } elseif {$type eq "operop"} {
         if {[cfg:get opnotc:operop $chan]} { putquick "NOTICE @$chan :$string" }
-        if {[cfg:get dnotc:operop $chan] && $rchan ne ""} { putquick "NOTICE $rchan :$string" }
+        if {[cfg:get dnotc:operop $chan] && $rchan ne ""} { putquick "$report_method $rchan :$string" }
     } elseif {$type eq "debug"} {
-        if {$rchan ne ""} { putquick "NOTICE $rchan :$string" }
-    }
+        if {$rchan ne ""} { putquick "$report_method $rchan :$string" }
+	}
 }
 
 
@@ -18842,7 +18851,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
 
     } elseif {$action eq "branches" || $action eq "b"} {
         # -- list available branches
-        lassign [update:github "https://api.github.com/repos/empus/armour/branches" "get branches" $type $target] success extra json
+        lassign [update:github "https://api.github.com/repos/speakzzz/armour/branches" "get branches" $type $target] success extra json
         if {!$success} { return; }; # -- error
         set count 0
         foreach branch $json {
@@ -18856,7 +18865,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
             set author [dict get $scommit author]
             #set aname [dict get $author name]
             set commitdate [dict get $author date]
-            reply $type $target "\002branch:\002 $bname -- \002url:\002 https://github.com/empus/armour/tree/$bname --\
+            reply $type $target "\002branch:\002 $bname -- \002url:\002 https://github.com/speakzzz/armour/tree/$bname --\
                 \002commit:\002 [userdb:timeago [clock scan $commitdate]] ago"
         }
         if {$count > 1} {
@@ -18864,7 +18873,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
         } 
     } elseif {$action eq "info"} {
         # -- list available branches
-        lassign [update:github "https://api.github.com/repos/empus/armour/branches/$branch" "get branch info" $type $target] success extra json
+        lassign [update:github "https://api.github.com/repos/speakzzz/armour/branches/$branch" "get branch info" $type $target] success extra json
         if {!$success} { reply $type $target "error."; return; }; # -- error
 
         set bname [dict get $json name]
@@ -18878,7 +18887,7 @@ proc arm:cmd:update {0 1 2 3 {4 ""} {5 ""}} {
         set commitdate [dict get $author date]
         if {$branch ne $cfgbranch} { set xtra "$branch" } else { set xtra "" }
         reply $type $target "\002branch:\002 $bname -- \002message:\002 $commitmsg -- \002commit:\002 [userdb:timeago [clock scan $commitdate]] ago\
-             -- \002url:\002 https://github.com/empus/armour/commit/$sha -- \002usage:\002 update install $xtra"
+             -- \002url:\002 https://github.com/speakzzz/armour/commit/$sha -- \002usage:\002 update install $xtra"
     } 
 
     # -- create log entry for command use
@@ -18925,7 +18934,7 @@ proc update:check {branch {debug "0"} {mode ""}} {
     if {$branch eq ""} { set branch "master" }
 
     debug 0 "\002update:check:\002 checking for updates -- branch: $branch -- debug: $debug"
-    set url "https://raw.githubusercontent.com/empus/armour/${branch}/.version"
+    set url "https://raw.githubusercontent.com/speakzzz/armour/${branch}/.version"
     http::register https 443 [list ::tls::socket -tls1.2 true -autoservername true]
     http::config -useragent "mozilla" 
     set errcode [catch {set tok [::http::geturl $url -timeout 10000]} error]
@@ -19136,7 +19145,7 @@ proc update:download {ghdata} {
     exec echo $start > ./armour/backup/.lock
 
     # -- download the script from github
-    ::github::github update empus armour ./armour/backup/armour-$start $arm::github(token) $branch
+    ::github::github update speakzzz armour ./armour/backup/armour-$start $arm::github(token) $branch
 
     # -- wait for the download to complete
     # TODO: consider doing this with total bytes instead of number of files (see: update:dirsize proc)
@@ -19983,16 +19992,15 @@ utimer [expr [cfg:get queue:secure *] / 2] arm::voice:stack; # -- offset the voi
 
 # -- load dronebl package if required
 if {[cfg:get dronebl] eq 1} {
-    putlog "\[@\] Armour: DEBUG: DroneBL enabled. Scheduling library load in 1 second."
     namespace eval dronebl {
         set rpckey $arm::cfg(dronebl:key)
     }
     # Use 'after' to delay loading, circumventing a potential race condition
     after 1000 {
-         putlog "\[@\] Armour: DEBUG: 'after' command now sourcing libdronebl.tcl"
          catch {source ./armour/packages/libdronebl.tcl} err
          if {$err ne ""} {
-             putlog "\[@\] Armour: DEBUG: Error sourcing libdronebl.tcl inside 'after' command: $err"
+             # This will log an error only if the source command fails again in the future
+             putlog "\[@\] Armour: ERROR sourcing libdronebl.tcl: $err"
          }
     }
 }

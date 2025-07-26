@@ -3,7 +3,6 @@
 # Find when nicks were last seen on the channel.
 #
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 bind join - * { arm::coroexec arm::seen:raw:join }
@@ -16,6 +15,7 @@ bind pubm - * { arm::coroexec arm::seen:raw:speak }
 bind mode - * { arm::coroexec arm::seen:raw:mode }
 bind topc - * { arm::coroexec arm::seen:raw:topic }
 
+set addcmd(seen) { seen 0 pub msg dcc }
 # -- the main command
 proc seen:cmd:seen {0 1 2 3 {4 ""} {5 ""}} {
     global botnick
@@ -214,7 +214,6 @@ db:close
 putlog "\[A\] Armour: loaded plugin: seen"
 
 # ------------------------------------------------------------------------------------------------
-}; # -- end namespace
 # ------------------------------------------------------------------------------------------------
 
 

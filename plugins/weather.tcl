@@ -11,7 +11,7 @@
 # Maximum calls per day can be set to 1000 to avoid charges.
 #
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
+
 # ------------------------------------------------------------------------------------------------
 
 
@@ -19,11 +19,14 @@ package require json
 package require http 2
 package require tls 1.7
 
-# -- shortcut
-proc arm:cmd:w {0 1 2 3 {4 ""} {5 ""}} { arm:cmd:weather $0 $1 $2 $3 $4 $5 }
+# -- register command with Armour's command handler
+set addcmd(weather) { weather 1 pub msg dcc }
+set addcmd(w)       { weather 1 pub msg dcc }
 
+# -- shortcut
+proc weather:cmd:w {0 1 2 3 {4 ""} {5 ""}} { coroexec weather:cmd:weather $0 $1 $2 $3 $4 $5 }
 # -- cmd: weather
-proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
+proc weather:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
     variable dbchans
     variable weatherLoop
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
@@ -109,13 +112,13 @@ proc arm:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
 		debug 0 "\002cmd:cmd:weather:\002 HTTP Error: $code"
         if {$ncode eq 404} {
             # -- city not found
-            if {[regexp -- {^(.*)\s([A-Za-z]{2})$} $city -> loc iso] && $weatherLoop < 1} {
+            if {[regexp -- {^([^,]+),?\s+([A-Za-z]{2})$} $city -> loc iso] && $weatherLoop < 1} {
                 # -- try reformat to "city, country"
                 incr weatherLoop
                 switch -- $type {
-                    pub { arm:cmd:weather $0 $1 $2 $3 $4 "$loc, $iso" }
-                    msg { arm:cmd:weather $0 $1 $2 $3 "$loc, $iso" }
-                    dcc { arm:cmd:weather $0 $1 $2 "$loc, $iso" }
+                    pub { arm::weather:cmd:weather $0 $1 $2 $3 $4 "$loc,$iso,US" }
+                    msg { arm::weather:cmd:weather $0 $1 $2 $3 "$loc,$iso,US" }
+                    dcc { arm::weather:cmd:weather $0 $1 $2 "$loc,$iso,US" }
                 }
             } else {
                 set city [string totitle $city]
@@ -281,5 +284,5 @@ proc weather:emoji {code} {
 putlog "\[A\] Armour: loaded plugin: weather"
 
 # ------------------------------------------------------------------------------------------------
-}; # -- end namespace
+
 # ------------------------------------------------------------------------------------------------
