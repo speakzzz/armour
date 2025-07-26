@@ -21,13 +21,13 @@ set addcmd(climate)     { climate 1 pub msg dcc }
 set addcmd(climate_ver) { climate 1 pub msg dcc }
 
 # --- DIAGNOSTIC COMMAND ---
-proc weathergov:cmd:weathergov_ver {0 1 2 3 {4 ""} {5 ""}} {
+proc climate:cmd:climate_ver {0 1 2 3 {4 ""} {5 ""}} {
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
     reply $type $target "WeatherGov Plugin v1.5 is correctly loaded."
 }
 
 # --- MAIN COMMAND ---
-proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
+proc climate:cmd:climate {0 1 2 3 {4 ""} {5 ""}} {
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
 
     set cmd "weathergov"
@@ -57,7 +57,7 @@ proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
         if {$dbcity ne ""} {
             set location $dbcity
         } else {
-            reply $type $target "\002usage:\002 weathergov <city, state | latitude,longitude>"
+            reply $type $target "\002usage:\002 climate <city, state | latitude,longitude>"
             return
         }
     }
