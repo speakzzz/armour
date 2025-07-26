@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------------------------
-# armour.tcl v5.0 autobuild completed on: Fri Nov  1 20:47:28 PDT 2024
+# armour.tcl v5.1-custom autobuild completed on: Sat Jul  1 12:03:28 PDT 2025
 # ------------------------------------------------------------------------------------------------
 #
 #     _                                    
@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025072500"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025072400"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -1091,6 +1091,7 @@ proc db:get {item table source value {source2 ""} {value2 ""}} {
     db:connect
     # -- encapsulate columns in "" for special names (limit)
     set items ""
+    set item_count [llength [split $item ,]]
     foreach i [split $item ,] {
         append items "\"$i\","
     }
@@ -1108,7 +1109,15 @@ proc db:get {item table source value {source2 ""} {value2 ""}} {
     set row [db:query $query]
     set result [lindex $row 0]; # -- return one value/row
     #debug 4 "db:get: get $item from $table where $source=$value$extra2 (\002row:\002 $row)"
-    if {[llength [join $result]] eq 1} { return [join $result] } else { return $result }
+#    if {[llength [join $result]] eq 1} { return [join $result] } else { return $result }
+
+# If we only asked for one column, return it as a single value. Otherwise, return the list of values.
+    # This is safer than using 'join' which can fail on special characters.
+    if {$item_count == 1} {
+        return $result
+    } else {
+        return [split $result]
+    }
 }
 
 # ---- create the tables
@@ -12484,7 +12493,7 @@ proc userdb:cmd:info {0 1 2 3 {4 ""} {5 ""}} {
             lassign $row cid tlevel
             if {$cid eq 1 && $tlevel != 0 && $tlevel != ""} { lappend lvls "global (\002$tlevel\002)"; continue; }
             set tchan [db:get chan channels id $cid]
-            if {[regexp {s} [lindex [getchanmode $tchan] 0]] && $type eq "pub" && $target ne $tchan \
+            if {[regexp {s} [lindex [getchanmode [join $tchan]] 0]] && $type eq "pub" && $target ne $tchan \
                 && $target ne [cfg:get chan:report]} { continue; }; # -- hide other +s (secret) channels from output
             lappend lvls "[join $tchan] ($tlevel)"
         }
@@ -13245,12 +13254,13 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     elseif {$ttype eq "vote"} { set ttype "vote"; set plug "vote" } \
     elseif {$ttype eq "weather"} { set ttype "weather"; set plug "weather" } \
     elseif {$ttype eq "weathergov"} { set ttype "weathergov"; set plug "weathergov" } \
+    elseif {$ttype eq "polls"} { set ttype "polls"; set plug "polls" } \
     elseif {$ttype eq "seen"} { set ttype "seen"; set plug "seen" } \
     elseif {$ttype eq "humour"} { set ttype "humour"; set plug "humour" } \
     elseif {$ttype eq "ninjas"} { set ttype "ninjas"; set plug "ninjas" } \
     else { set usage 1 }
 
-    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock weathergov"
+    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock weathergov polls"
     
     # -- optional settings based on plugins
     set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0; set plugin(weather) 0;
@@ -13265,6 +13275,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     if {[info commands vote:nick] ne ""} { set plugin(vote) 1; append setlist " vote" }; # -- vote
     if {[info commands weather:emoji] ne ""} { set plugin(weather) 1; append setlist " weather" }; # -- weather
     if {[info commands weathergov:cmd:weathergov] ne ""} { set plugin(weathergov) 1; append setlist " weathergov" }
+    if {[info commands polls:cmd:poll] ne ""} { set plugin(polls) 1; append setlist " polls" }
     if {[info commands seen:insert] ne ""} { set plugin(seen) 1; append setlist " seen" }; # -- seen
     if {[info commands humour:cmd] ne ""} { set plugin(humour) 1; append setlist " humour" }; # -- humour
     if {[info commands ninjas:cmd] ne ""} { set plugin(ninjas) 1; append setlist " ninjas" }; # -- ninjas
