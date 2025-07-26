@@ -2,7 +2,7 @@
 # origin concept from Elven <elven@elven.de>
 #
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
+
 # ------------------------------------------------------------------------------------------------
 
 # -- default channel
@@ -298,5 +298,4 @@ proc tell:reply {type target msg} {
 
 putlog "\[@\] Armour: loaded plugin: tell"
 
-}
 # -- end of namespace
