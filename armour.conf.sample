@@ -1373,6 +1373,7 @@ set addcmd(update)      {  arm       500        pub msg dcc  }
 #set addplugin(ninjas) "./armour/plugins/ninjas.tcl";         # -- ninjas (jokes, facts, etc)
 #set addplugin(humour) "./armour/plugins/humour.tcl";         # -- humour (gifs, memes, etc)
 #set addplugin(weather) "./armour/plugins/weather.tcl";       # -- current weather by city
+#set addplugin(weathergov) "./armour/plugins/weathergov.tcl"; # -- weather by city in US only no token required
 #set addplugin(seen) "./armour/plugins/seen.tcl";             # -- showing user lastseen
 #set addplugin(tell) "./armour/plugins/tell.tcl";             # -- tell reminders
 #set addplugin(trakka) "./armour/plugins/trakka/trakka.tcl";  # -- trakka scoring for private chans
