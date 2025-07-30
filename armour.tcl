@@ -1337,6 +1337,16 @@ db:query "CREATE TABLE IF NOT EXISTS ignores (\
 	reason TEXT
 	)"
 
+# -- create web sessions table
+db:query "CREATE TABLE IF NOT EXISTS web_sessions (
+    session_id TEXT PRIMARY KEY,
+    user TEXT NOT NULL,
+    expires_ts INTEGER NOT NULL
+    )"
+
+# -- cronjob to periodically delete expired web sessions
+bind cron - "0 */6 * * *" {arm::coroexec arm::web::cleanup_sessions}
+
 # -- providing a mechanism to manage DB upgrade and migration between script versions
 proc db:upgrade {} {
     variable cfg

@@ -1,0 +1,11 @@
+<h1>Dashboard</h1>
+<div class='grid'>
+  <article>
+    <h4>Bot Status</h4>
+    <ul>
+      <li><b>Bot Name:</b> %%BOT_NAME%%</li>
+      <li><b>Armour Version:</b> %%ARMOUR_VERSION%%</li>
+      <li><b>Uptime:</b> %%UPTIME%%</li>
+    </ul>
+  </article>
+  </div>
