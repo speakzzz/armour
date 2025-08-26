@@ -13101,6 +13101,7 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
     variable entries
     variable trakka
     variable lastspeak
+    variable float:timer
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
 
     set cmd "remchan"
@@ -13111,7 +13112,7 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
     set rchan [lindex $arg 0]
     # -- ensure user has required access for command
     if {![userdb:isAllowed $nick $cmd $rchan $type]} { return; }
-    
+
     set isforce [lindex $arg 1]
     set log "$chan [join $arg]"; set log [string trimright $log " "]
 
@@ -13121,18 +13122,28 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
         return;
     }
 
+    # Sanitize the channel name
+    set rchan [string trim $rchan "{}"]
+
     # -- check if chan already exists
     lassign [db:get chan,id channels chan $rchan] tchan tcid
     if {$tchan eq ""} {
         reply $type $target "error: channel $rchan is not registered."
         return;
     }
-    
+
     if {[string tolower $isforce] ne "-force"} {
         reply $type $target "\002(warning)\002 to really purge this channel and any exclusive users, please add -force"
         return;
     }
-    
+
+   # Find and kill any related timers BEFORE deleting records
+    if {[info exists float:timer([string tolower $tchan])]} {
+    after cancel $float:timer([string tolower $tchan])
+    unset float:timer([string tolower $tchan])
+    debug 0 "userdb:cmd:remchan: cancelled pending float:check timer for $tchan"
+}
+
     # -- delete the channel!
     debug 0 "userdb:cmd:remchan: purging channel $tchan"
     dict unset dbchans $tcid
