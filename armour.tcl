@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025082601"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025082602"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -13131,6 +13131,9 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
         reply $type $target "error: channel $rchan is not registered."
         return;
     }
+
+    # flatten the channel name from a list to a string
+    set tchan [join $tchan]
 
     if {[string tolower $isforce] ne "-force"} {
         reply $type $target "\002(warning)\002 to really purge this channel and any exclusive users, please add -force"
