@@ -551,7 +551,7 @@ set cfg(bot:remote:whois) "remote-bot"
 set cfg(web:enable) 0
 set cfg(web:bind) "127.0.0.1"
 set cfg(web:port) 8080
-set cfg(web:level) 500
+set cfg(web:level) 400
 
 # ------------------------------------------------------------------------------------------------
 # CAPTCHA SETTINGS
