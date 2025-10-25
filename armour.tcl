@@ -6606,7 +6606,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         xuser     { set method "user"    }
         host      { set method "host"    }
         h         { set method "host"    }
-        ip        { set method "host"    } # Note: Treat ip as host for general lists
+        ip        { set method "host"    } 
         net       { set method "host"    }
         mask      { set method "host"    }
         asn       { set method "asn"     }
