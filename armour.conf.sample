@@ -1037,6 +1037,11 @@ set cfg(weather:units) "both"
 set cfg(weather:precise) 0
 
 
+# ------------------------------------------------------------------------------------------------
+# --- OpenCage API Key for Weather Plugin ---
+# Get a free key from https://opencagedata.com/api
+# ------------------------------------------------------------------------------------------------
+set cfg(weather:key) "YOUR_OPENCAGE_API_KEY_HERE"
 
 # ------------------------------------------------------------------------------------------------
 # NINJAS PLUGIN -- settings only relevant if optional plugin is loaded: ninjas
@@ -1230,6 +1235,15 @@ set cfg(speak:openai:format) "mp3"
 
 
 # ------------------------------------------------------------------------------------------------
+# -- Polls Plugin Settings
+# ------------------------------------------------------------------------------------------------
+# Minimum Armour user level to create a poll
+set cfg(polls:allow_create) 400
+# Minimum Armour user level to close a poll created by someone else
+set cfg(polls:allow_close) 450
+
+
+# ------------------------------------------------------------------------------------------------
 # ELEVENLABS -- relevant settings only if cfg(speak:service) set to: elevenlabs
 # www.elevenlabs.io
 # ------------------------------------------------------------------------------------------------
@@ -1364,6 +1378,7 @@ set addcmd(update)      {  arm       500        pub msg dcc  }
 #set addplugin(ninjas) "./armour/plugins/ninjas.tcl";         # -- ninjas (jokes, facts, etc)
 #set addplugin(humour) "./armour/plugins/humour.tcl";         # -- humour (gifs, memes, etc)
 #set addplugin(weather) "./armour/plugins/weather.tcl";       # -- current weather by city
+#set addplugin(weathergov) "./armour/plugins/weathergov.tcl"; # -- weather by city in US only token required
 #set addplugin(seen) "./armour/plugins/seen.tcl";             # -- showing user lastseen
 #set addplugin(tell) "./armour/plugins/tell.tcl";             # -- tell reminders
 #set addplugin(trakka) "./armour/plugins/trakka/trakka.tcl";  # -- trakka scoring for private chans

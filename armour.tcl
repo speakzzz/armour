@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------------------------
-# armour.tcl v5.0 autobuild completed on: Fri Nov  1 20:47:28 PDT 2024
+# armour.tcl v5.1-custom autobuild completed on: Sat Jul  1 12:03:28 PDT 2025
 # ------------------------------------------------------------------------------------------------
 #
 #     _                                    
@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025072500"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025082602"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -1091,6 +1091,7 @@ proc db:get {item table source value {source2 ""} {value2 ""}} {
     db:connect
     # -- encapsulate columns in "" for special names (limit)
     set items ""
+    set item_count [llength [split $item ,]]
     foreach i [split $item ,] {
         append items "\"$i\","
     }
@@ -1108,7 +1109,15 @@ proc db:get {item table source value {source2 ""} {value2 ""}} {
     set row [db:query $query]
     set result [lindex $row 0]; # -- return one value/row
     #debug 4 "db:get: get $item from $table where $source=$value$extra2 (\002row:\002 $row)"
-    if {[llength [join $result]] eq 1} { return [join $result] } else { return $result }
+#    if {[llength [join $result]] eq 1} { return [join $result] } else { return $result }
+
+# If we only asked for one column, return it as a single value. Otherwise, return the list of values.
+    # This is safer than using 'join' which can fail on special characters.
+    if {$item_count == 1} {
+        return $result
+    } else {
+        return [split $result]
+    }
 }
 
 # ---- create the tables
@@ -1327,6 +1336,16 @@ db:query "CREATE TABLE IF NOT EXISTS ignores (\
 	expire_ts INT NOT NULL,\
 	reason TEXT
 	)"
+
+# -- create web sessions table
+db:query "CREATE TABLE IF NOT EXISTS web_sessions (
+    session_id TEXT PRIMARY KEY,
+    user TEXT NOT NULL,
+    expires_ts INTEGER NOT NULL
+    )"
+
+# -- cronjob to periodically delete expired web sessions
+bind cron - "0 */6 * * *" {arm::coroexec arm::web::cleanup_sessions}
 
 # -- providing a mechanism to manage DB upgrade and migration between script versions
 proc db:upgrade {} {
@@ -4566,7 +4585,7 @@ proc arm:cmd:op {0 1 2 3 {4 ""} {5 ""}} {
 
     mode:op $chan $oplist; # -- send the OP to server or channel service
     
-     if {$type ne "pub"} { reply $type $target "done." }   
+     if {$type ne "pub"} { reply $type $target "👮 Opped \002[join $oplist ", "]\002 in \002$chan\002." }
     # -- create log entry for command use
     set cid [db:get id channels chan $chan]
     log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] "$log" "$source" "" "" ""
@@ -4619,7 +4638,7 @@ proc arm:cmd:deop {0 1 2 3 {4 ""} {5 ""}} {
 
     mode:deop $chan $deoplist; # -- send the DEOP to server or channel service
 
-    if {$type ne "pub"} { reply $type $target "done." }
+    if {$type ne "pub"} { reply $type $target "🚶 De-opped \002[join $deoplist ", "]\002 in \002$chan\002." }
     # -- create log entry for command use
     set cid [db:get id channels chan $chan]
     log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] "$log" "$source" "" "" ""
@@ -4679,8 +4698,8 @@ proc arm:cmd:voice {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     mode:voice $chan $voicelist; # -- send the VOICE to server or channel service
-    
-    if {$type ne "pub"} { reply $type $target "done." }
+
+    if {$type ne "pub"} { reply $type $target "🗣️ Voiced \002[join $voicelist ", "]\002 in \002$chan\002." }
     # -- create log entry for command use
     set cid [db:get id channels chan $chan]
     log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] "$log" "$source" "" "" ""
@@ -4692,7 +4711,7 @@ proc arm:cmd:devoice {0 1 2 3 {4 ""} {5 ""}} {
     global botnick
     variable cfg;
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
-    
+
     set cmd "devoice"
     lassign [db:get id,user users curnick $nick] uid user
 
@@ -4726,7 +4745,7 @@ proc arm:cmd:devoice {0 1 2 3 {4 ""} {5 ""}} {
 
     mode:devoice $chan $devoicelist; # -- send the DEVOICE to server or channel service
     
-    if {$type ne "pub"} { reply $type $target "done." }
+    if {$type ne "pub"} { reply $type $target "🔇 De-voiced \002[join $devoicelist ", "]\002 in \002$chan\002." }
     # -- create log entry for command use
     set cid [db:get id channels chan $chan]
     log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] "$log" "$source" "" "" ""
@@ -5035,7 +5054,7 @@ proc arm:cmd:unban {0 1 2 3 {4 ""} {5 ""}} {
     } else {
         # -- unban via channel service
         mode:unban $chan $ublist; 
-        if {$type ne "pub"} { reply $type $target "done." }
+        if {$type ne "pub"} { reply $type $target "✅ Unbanned \002[llength $unbanlist]\002 mask(s) in \002$chan\002." }
     }
 
     # -- create log entry for command use
@@ -12484,7 +12503,7 @@ proc userdb:cmd:info {0 1 2 3 {4 ""} {5 ""}} {
             lassign $row cid tlevel
             if {$cid eq 1 && $tlevel != 0 && $tlevel != ""} { lappend lvls "global (\002$tlevel\002)"; continue; }
             set tchan [db:get chan channels id $cid]
-            if {[regexp {s} [lindex [getchanmode $tchan] 0]] && $type eq "pub" && $target ne $tchan \
+            if {[regexp {s} [lindex [getchanmode [join $tchan]] 0]] && $type eq "pub" && $target ne $tchan \
                 && $target ne [cfg:get chan:report]} { continue; }; # -- hide other +s (secret) channels from output
             lappend lvls "[join $tchan] ($tlevel)"
         }
@@ -12846,7 +12865,7 @@ proc userdb:cmd:adduser {0 1 2 3 {4 ""}  {5 ""}} {
     
     debug 1 "userdb:cmd:adduser: added user: $tuser (chan: $chan -- level: $trglevel -- automode: $automodew)"
     
-    reply $type $target "added user $tuser \002(chan:\002 $chan -- \002level:\002 $trglevel -- \002automode:\002 $automodew\002)\002"
+    reply $type $target "✅ Success: User \002$tuser\002 has been added to channel \002$chan\002 with level \002$trglevel\002 and automode \002$automodew\002."
     
     # -- send a note to the user?
     if {[cfg:get note $chan] && [cfg:get note:adduser $chan] && $trguser ne $user} {
@@ -12935,7 +12954,7 @@ proc userdb:cmd:remuser {0 1 2 3 {4 ""}  {5 ""}} {
     
     debug 1 "userdb:cmd:remuser: removed user: $tuser (chan: $chan -- level: $tlevel)"
     
-    reply $type $target "removed user $tuser \002(chan:\002 $chan -- \002level:\002 $tlevel)\002"
+    reply $type $target "🗑️ Success: User \002$tuser\002 (level $tlevel) has been removed from channel \002$chan\002."
     
     # -- send a note to the user?
     if {[cfg:get note $chan] && [cfg:get note:remuser $chan] && $tuser ne $user} {
@@ -13053,7 +13072,7 @@ proc userdb:cmd:addchan {0 1 2 3 {4 ""}  {5 ""}} {
         db:close
         utimer 5 "arm::float:check:chan $tcid 0"; # -- set floatlim but don't restart timer again
     }
-    
+
     if {$tuser ne ""} {
         lassign [db:get id,user users user $tuser] tuid tuser
         if {$tuid eq ""} {
@@ -13064,11 +13083,11 @@ proc userdb:cmd:addchan {0 1 2 3 {4 ""}  {5 ""}} {
         set res [db:query "INSERT INTO levels (cid,uid,level,added_ts,added_bywho,modif_ts,modif_bywho) \
             VALUES ($tcid, $tuid, 500, $regts, '$db_bywho', $regts, '$db_bywho')"]
         db:close
-        reply $type $target "done. registered $achan (user: $tuser)"
+        reply $type $target "✅ Success: Channel \002$achan\002 has been registered with \002$tuser\002 as the initial manager."
     } else {
-        reply $type $target "done. registered $achan"
-    }
- 
+        reply $type $target "✅ Success: Channel \002$achan\002 has been registered."
+}
+
     # -- create log entry for command use
     log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
 }
@@ -13082,8 +13101,9 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
     variable entries
     variable trakka
     variable lastspeak
-    lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
-    
+    variable float:timer
+    lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
+
     set cmd "remchan"
 
     lassign [db:get id,user users curnick $nick] uid user
@@ -13092,7 +13112,7 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
     set rchan [lindex $arg 0]
     # -- ensure user has required access for command
     if {![userdb:isAllowed $nick $cmd $rchan $type]} { return; }
-    
+
     set isforce [lindex $arg 1]
     set log "$chan [join $arg]"; set log [string trimright $log " "]
 
@@ -13102,18 +13122,31 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
         return;
     }
 
+    # Sanitize the channel name
+    set rchan [string trim $rchan "{}"]
+
     # -- check if chan already exists
     lassign [db:get chan,id channels chan $rchan] tchan tcid
     if {$tchan eq ""} {
         reply $type $target "error: channel $rchan is not registered."
         return;
     }
-    
+
+    # flatten the channel name from a list to a string
+    set tchan [join $tchan]
+
     if {[string tolower $isforce] ne "-force"} {
         reply $type $target "\002(warning)\002 to really purge this channel and any exclusive users, please add -force"
         return;
     }
-    
+
+   # Find and kill any related timers BEFORE deleting records
+    if {[info exists float:timer([string tolower $tchan])]} {
+    after cancel $float:timer([string tolower $tchan])
+    unset float:timer([string tolower $tchan])
+    debug 0 "userdb:cmd:remchan: cancelled pending float:check timer for $tchan"
+}
+
     # -- delete the channel!
     debug 0 "userdb:cmd:remchan: purging channel $tchan"
     dict unset dbchans $tcid
@@ -13165,14 +13198,14 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
             # -- user not added anywhere anymore; delete user account
             set tuser [db:get user users id $did]
             userdb:deluser $tuser $did; # -- delete!
-            incr count            
+            incr count
         }
     }
     channel remove $tchan; # -- remove chan from eggdrop
-    
+
     if {$count eq 1} { set txt "user" } else { set txt "users" }
-    reply $type $target "done. $tchan has \002disintegrated\002. $count users also deleted."
-     
+    reply $type $target "🗑️ Success: Channel \002$tchan\002 has been purged. \002$count\002 exclusive user(s) were also removed."
+
     # -- create log entry for command use
     log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
 }
@@ -13184,9 +13217,9 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
     variable dbchans;      # -- dict to store channel db data
     variable atopic:topic; # -- track whether TOPIC responses are expected
-    
+
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
-    
+
     set cmd "modchan"
 
     # -- ensure user has required access for command
@@ -13245,12 +13278,13 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     elseif {$ttype eq "vote"} { set ttype "vote"; set plug "vote" } \
     elseif {$ttype eq "weather"} { set ttype "weather"; set plug "weather" } \
     elseif {$ttype eq "weathergov"} { set ttype "weathergov"; set plug "weathergov" } \
+    elseif {$ttype eq "polls"} { set ttype "polls"; set plug "polls" } \
     elseif {$ttype eq "seen"} { set ttype "seen"; set plug "seen" } \
     elseif {$ttype eq "humour"} { set ttype "humour"; set plug "humour" } \
     elseif {$ttype eq "ninjas"} { set ttype "ninjas"; set plug "ninjas" } \
     else { set usage 1 }
 
-    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock weathergov"
+    set setlist "mode url desc autotopic floatlim floatperiod floatmargin floatgrace strictop strictvoice correct operop kicklock weathergov polls"
     
     # -- optional settings based on plugins
     set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0; set plugin(weather) 0;
@@ -13265,6 +13299,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     if {[info commands vote:nick] ne ""} { set plugin(vote) 1; append setlist " vote" }; # -- vote
     if {[info commands weather:emoji] ne ""} { set plugin(weather) 1; append setlist " weather" }; # -- weather
     if {[info commands weathergov:cmd:weathergov] ne ""} { set plugin(weathergov) 1; append setlist " weathergov" }
+    if {[info commands polls:cmd:poll] ne ""} { set plugin(polls) 1; append setlist " polls" }
     if {[info commands seen:insert] ne ""} { set plugin(seen) 1; append setlist " seen" }; # -- seen
     if {[info commands humour:cmd] ne ""} { set plugin(humour) 1; append setlist " humour" }; # -- humour
     if {[info commands ninjas:cmd] ne ""} { set plugin(ninjas) 1; append setlist " ninjas" }; # -- ninjas
@@ -14308,7 +14343,8 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
 
     debug 1 "userdb:cmd:moduser: chan: $chan -- cid: $cid -- tuser: $tuser -- tuid: $tuid --\
             ttype: $ttype -- tvalue: $tvalue (user: $user)"
-    reply $type $target "done."
+    if {$ttype eq "greet"} { set tvalue [join $tvalue] }; # Ensure greet value is a single string
+    reply $type $target "🛠️ Success: Setting \002$ttype\002 for user \002$tuser\002 on channel \002$chan\002 has been updated to '\002$tvalue\002'."
         
     log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
     return;

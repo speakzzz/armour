@@ -1,14 +1,10 @@
 # ------------------------------------------------------------------------------------------------
-# WeatherGov Plugin for Armour (v1.5)
+# WeatherGov Plugin for Armour (v1.7 - Final)
 # ------------------------------------------------------------------------------------------------
 #
 # Provides weather information for locations within the United States via the weather.gov API.
-#
-# v1.1 - Added handling for the API's 301 redirect.
-# v1.2 - Added a diagnostic version command.
-# v1.3 - Corrected command registration and proc naming convention.
-# v1.4 - Correctly handles HTTP 301 redirects by checking the HTTP status code and Location header.
-# v1.5 - Correctly handles relative URLs provided in the HTTP Location header.
+# This version has been modified to use the OpenCage API for geocoding and reads its
+# API key from armour.conf.
 #
 # ------------------------------------------------------------------------------------------------
 
@@ -17,20 +13,20 @@ package require http 2
 package require tls 1.7
 
 # -- Register the commands with Armour's command handler
-set addcmd(weathergov)     { weathergov 1 pub msg dcc }
-set addcmd(weathergov_ver) { weathergov 1 pub msg dcc }
+set addcmd(climate)     { climate 1 pub msg dcc }
+set addcmd(climate_ver) { climate 1 pub msg dcc }
 
 # --- DIAGNOSTIC COMMAND ---
-proc weathergov:cmd:weathergov_ver {0 1 2 3 {4 ""} {5 ""}} {
+proc climate:cmd:climate_ver {0 1 2 3 {4 ""} {5 ""}} {
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
-    reply $type $target "WeatherGov Plugin v1.5 is correctly loaded."
+    reply $type $target "Climate (WeatherGov) Plugin v1.7 is correctly loaded."
 }
 
 # --- MAIN COMMAND ---
-proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
+proc climate:cmd:climate {0 1 2 3 {4 ""} {5 ""}} {
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
 
-    set cmd "weathergov"
+    set cmd "climate"
     lassign [db:get id,user users curnick $nick] uid user
     set chan [userdb:get:chan $user $chan]
     set cid [db:get id channels chan $chan]
@@ -38,7 +34,7 @@ proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
 
     set ison [arm::db:get value settings setting "weathergov" cid $cid]
     if {$ison ne "on"} {
-        debug 1 "\002cmd:weathergov:\002 weathergov not enabled on $chan. Use: \002modchan $chan weathergov on\002"
+        debug 1 "\002cmd:climate:\002 weathergov not enabled on $chan. Use: \002modchan $chan weathergov on\002"
         return
     }
 
@@ -57,31 +53,48 @@ proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
         if {$dbcity ne ""} {
             set location $dbcity
         } else {
-            reply $type $target "\002usage:\002 weathergov <city, state | latitude,longitude>"
+            reply $type $target "\002usage:\002 climate <city, state | latitude,longitude>"
             return
         }
     }
 
-    http::register https 443 [list ::tls::socket -autoservername true]
-    set headers [list User-Agent "MyArmourBot/1.0 (mybot@example.com)"]
-
-    set geo_query [http::formatQuery q $location format "json"]
-    if {[catch {http::geturl "https://nominatim.openstreetmap.org/search?$geo_query" -headers $headers} tok]} {
-        reply $type $target "\002error:\002 Could not connect to geocoding service."
+    # --- Geocoding via OpenCage API ---
+    set apikey [cfg:get weather:key]
+    if {$apikey eq ""} {
+        reply $type $target "\002error:\002 OpenCage API key is not set in armour.conf. Please add: set cfg(weather:key) \"YOUR_KEY\""
         return
     }
-    set geo_data [::json::json2dict [http::data $tok]]
+    http::register https 443 [list ::tls::socket -autoservername true]
+    set headers [list User-Agent "ArmourWeatherPlugin/1.7 ($::botnick on $::network)"]
+    set geo_query [http::formatQuery q $location key $apikey]
+
+    if {[catch {http::geturl "https://api.opencagedata.com/geocode/v1/json?$geo_query" -headers $headers} tok]} {
+        reply $type $target "\002error:\002 Could not connect to OpenCage geocoding service."
+        return
+    }
+
+    set http_status [http::ncode $tok]
+    set http_data [http::data $tok]
     http::cleanup $tok
 
-    if {[llength $geo_data] == 0} {
+    if {$http_status != 200} {
+        reply $type $target "\002error:\002 OpenCage API returned a non-successful status: $http_status."
+        return
+    }
+
+    set geo_data [::json::json2dict $http_data]
+    set results [dict get $geo_data "results"]
+
+    if {[llength $results] == 0} {
         reply $type $target "\002error:\002 Location not found: $location"
         return
     }
 
-    set first_result [lindex $geo_data 0]
-    set lat [dict get $first_result "lat"]
-    set lon [dict get $first_result "lon"]
-    set display_name [dict get $first_result "display_name"]
+    set first_result [lindex $results 0]
+    set geometry [dict get $first_result "geometry"]
+    set lat [dict get $geometry "lat"]
+    set lon [dict get $geometry "lng"]
+    set display_name [dict get $first_result "formatted"]
 
     if {[catch {http::geturl "https://api.weather.gov/points/$lat,$lon" -headers $headers} tok]} {
         reply $type $target "\002error:\002 Could not connect to weather.gov API."
@@ -91,10 +104,9 @@ proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
     set ncode [http::ncode $tok]
     set points_data [http::data $tok]
     set meta [http::meta $tok]
-
-    # --- START OF FIX (v1.5) ---
+    
     if {$ncode == 301} {
-        debug 1 "\002cmd:weathergov:\002 API returned HTTP 301. Following redirect."
+        debug 1 "\002cmd:climate:\002 API returned HTTP 301. Following redirect."
         set new_points_url [dict get $meta "Location"]
         http::cleanup $tok
 
@@ -103,7 +115,6 @@ proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
             return
         }
         
-        # Check if the URL is relative (starts with /) and prepend the base URL if it is.
         if {[string index $new_points_url 0] eq "/"} {
             set new_points_url "https://api.weather.gov$new_points_url"
         }
@@ -121,7 +132,6 @@ proc weathergov:cmd:weathergov {0 1 2 3 {4 ""} {5 ""}} {
          http::cleanup $tok
          return
     }
-    # --- END OF FIX ---
     
     http::cleanup $tok
     set points_json [::json::json2dict $points_data]
