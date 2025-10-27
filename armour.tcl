@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025102201"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025082602"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -6563,7 +6563,7 @@ proc arm:cmd:view {0 1 2 3 {4 ""} {5 ""}} {
 
 # -- command: add
 # add a whitelist or blacklist entry
-# usage: add ?chan? <white|black|dronebl|ircbl> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? [reason|comment]
+# usage: add ?chan? <white|black> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? [reason]
 proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
     variable entries;
@@ -6573,7 +6573,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     variable nickdata;
     variable dbchans;
 
-    lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
+    lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
 
     set cmd "add"
     lassign [db:get id,user users curnick $nick] uid user
@@ -6582,21 +6582,16 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     if {[string index $first 0] eq "#" || [string index $first 0] eq "*"} {
         set ischan 1; set chan $first; set list [lindex $arg 1]; set method [lindex $arg 2]
         set value [lindex [split $arg] 3]; set action [string tolower [lindex $arg 4]]
-        # Need to determine the starting index for reason/limit based on whether a channel was provided
-        set reason_start_idx 5
     } else {
         set list [lindex $arg 0]; set method [lindex $arg 1]; set value [lindex [split $arg] 2]
         set action [string tolower [lindex $arg 3]]
         set chan [userdb:get:chan $user $chan];
-        # Need to determine the starting index for reason/limit
-        set reason_start_idx 4
     }
     set cid [db:get id channels chan $chan]
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     set log "$chan [join $arg]"; set log [string trimright $log " "]
 
     set usage 0;
-    set orig_method $method ; # Keep original method string for dronebl/ircbl check
     set method [string tolower $method]
     switch -- $method {
         regex     { set method "regex"   }
@@ -6606,7 +6601,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         xuser     { set method "user"    }
         host      { set method "host"    }
         h         { set method "host"    }
-        ip        { set method "host"    } # Note: Treat ip as host for general lists
+        ip        { set method "host"    }
         net       { set method "host"    }
         mask      { set method "host"    }
         asn       { set method "asn"     }
@@ -6627,10 +6622,9 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         text      { set method "text"    }
         t         { set method "text"    }
         reply     { set method "text"    }
-        default   { if {$list ni {dronebl ircbl}} {set usage 1;} } # Only flag usage if not dronebl/ircbl which have simpler method reqs
+        default   { set usage 1;         }
     }
 
-    set orig_list $list ; # Keep original list string
     if     {[string index $list 0] eq "w"} { set list "white"   } \
     elseif {[string index $list 0] eq "b"} { set list "black"   } \
     elseif {[string index $list 0] eq "d"} { set list "dronebl" } \
@@ -6640,133 +6634,92 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     set globlevel [db:get level levels cid 1 uid $uid]
     if {$globlevel eq ""} { set globlevel 0 }
 
-    # --- Determine DroneBL/IRCBL availability and syntax strings ---
-    set candronebl 0; set canircbl 0; set xtra1 ""; set canrbl 0; set xtra2 " \[reason\]"
+    set candronebl 0; set canircbl 0; set xtra1 ""; set canrbl 0;
     if {[info commands ::dronebl::submit] ne "" && [userdb:get:level $user $chan] >= [cfg:get dronebl:lvl $chan]} {
         set candronebl 1; set canrbl 1; append xtra1 "|dronebl"; set xtra2 " \[reason|comment\]"
-    }
-    if {[cfg:get ircbl $chan] && $globlevel >= [cfg:get ircbl:lvl $chan]} {
-        set canircbl 1; set canrbl 1; append xtra1 "|ircbl"; set xtra2 " \[reason|comment\]"
-    }
+    } else { set xtra2 " \[reason\]" }
 
-    # --- Define the general syntax FIRST ---
+    if {[cfg:get ircbl $chan] && $globlevel >= [cfg:get ircbl:lvl $chan]} {
+        set canircrbl 1; set canrbl 1; append xtra1 "|ircbl"; set xtra2 " \[reason|comment\]"
+    } else { set xtra2 " \[reason\]" }
+
     set syntax "\002usage:\002 add ?chan? <white|black${xtra1}> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? $xtra2"
 
-    # --- Handle DroneBL/IRCBL FIRST ---
     if {$list eq "dronebl" || $list eq "ircbl"} {
         # --- THIS IS THE NEW, CRITICAL CHECK ---
-        if {[info commands ::dronebl::submit] == "" && $list eq "dronebl"} {
+        if {[info commands ::dronebl::submit] == ""} {
             reply $stype $starget "\002Error:\002 DroneBL commands are not available. This is likely due to a network timeout when the script started. Please rehash the bot and try again later."
             return
         }
         # --- END OF NEW CHECK ---
 
-        # Check permissions specifically for dronebl/ircbl
-        if {($list eq "dronebl" && !$candronebl) || ($list eq "ircbl" && !$canircbl)} {
-             reply $stype $starget "\002error:\002 insufficient access to use $list."
-             return;
+        if {$value eq "" || $method eq ""} {
+            if {$canrbl} {
+                reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[comment\]"
+                return;  
+            } else {
+                reply $stype $starget $syntax
+                return;
+            }
         }
 
-        # Validate method for dronebl/ircbl (host, ip, last)
-        set rbl_method [string tolower $orig_method]
-        if {$rbl_method ni {host ip last}} {
-             reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[comment\]"
-             return;
-        }
-        set method $rbl_method ; # Use the validated method
-
-        # Check if value is provided
-        if {$value eq ""} {
-            reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[comment\]"
-            return;
-        }
-
-        # Get comment (rest of args)
-        set comment [lrange $arg $reason_start_idx end]
+        set comment [lrange $arg 3 end]
 
         if {$method eq "last"} {
             if {![info exists data:lasthosts($chan)]} { reply $type $target "error: no hosts in memory."; return; }
-            if {![string is integer -strict $value] || $value < 1} {
-                 reply $type $target "\002error:\002 last value must be a positive integer."; return;
-            }
-            set method "host" ; # Method becomes host when using 'last'
-            set max_last [llength [get:val data:lasthosts $chan]]
-            if {$value > $max_last} { $value = $max_last } ; # Don't try to get more than available
-            set loop [lrange [get:val data:lasthosts $chan] 0 [expr $value - 1]]
-        } else {
+            set method "host"
+            set loop [lrange [get:val data:lasthosts $chan] 0 [expr $value - 1]] 
+        } else { 
             set loop [split $value ,]
         }
-
-        foreach ip_or_host $loop {
-            set target_ip $ip_or_host
-            if {![isValidIP $target_ip]} {
-                 set target_ip [lindex [dns:lookup $target_ip] 0] ; # Resolve if it's a host
-                 if {$target_ip eq "" || $target_ip eq "error"} {
-                      reply $stype $starget "\002error:\002 Could not resolve host: $ip_or_host"
-                      continue;
-                 }
-            }
-             # Validate method again after potential 'last' expansion
-            if {$method ne "ip" && $method ne "host"} {
-                 reply $stype $starget "\002error:\002 Invalid method '$method' for $list after 'last' expansion."
-                 continue;
+        foreach ip $loop {
+            if {$ip eq "" || (![isValidIP $ip] && {set ip [dns:lookup $ip]} eq "error") || ($method ne "ip" && $method ne "host")} {
+                reply $stype $starget "\002usage:\002 add $list <host|ip|last> <value1,value2..> \[comment\]"
+                continue;       
             }
 
             if {$list eq "dronebl"} {
                 set ttype [cfg:get dronebl:type $chan];
-                if {[::dronebl::submit "$ttype $target_ip $comment"]} { # Pass comment
-                    debug 1 "arm:cmd:add: dronebl submit successful (ip: $target_ip, type: $ttype, comment: $comment)"
-                    reply $type $target "DroneBL submit successful (\002ip:\002 $target_ip)"
+                if {[::dronebl::submit "$ttype $ip"]} {
+                    debug 1 "arm:cmd:add: dronebl submit successful (ip: $ip, type: $ttype)"
+                    reply $type $target "DroneBL submit successful (\002ip:\002 $ip)"
                 } else {
                     set error_msg [::dronebl::lasterror]
-                    debug 1 "arm:cmd:add: dronebl submit failed (ip: $target_ip response: $error_msg)"
-                    reply $type $target "DroneBL submit failed (\002ip:\002 $target_ip): $error_msg"
+                    debug 1 "arm:cmd:add: dronebl submit failed (ip: $ip response: $error_msg)"
+                    reply $type $target "DroneBL submit failed (\002ip:\002 $ip): $error_msg"
                 }
             } elseif {$list eq "ircbl"} {
                 set ttype [cfg:get ircbl:type $chan];
-                set result [lindex [ircbl:query add $target_ip $ttype $comment] 1]
+                set result [lindex [ircbl:query add $ip $ttype $comment] 1]
                 reply $type $target $result
+                continue;
             }
         }
         log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] "$log" "$source" "" "" ""
-        return; # --- EXIT after handling dronebl/ircbl ---
+        return;
     }
-    # --- END DroneBL/IRCBL Handling ---
 
-
-    # --- General White/Black list handling starts here ---
-
-    # Determine action and starting index for limit/reason
-    set tn $reason_start_idx ; # Default start index
     if {$action eq "accept" || $action eq "a"} {
         if {$method eq "text"} { reply $type $target "\002error:\002 action does not apply to text entries."; return; }
-        set theaction "A";
+        set theaction "A"; set tn 4
     } elseif {$action eq "voice" || $action eq "v"} {
         if {$method eq "text"} { reply $type $target "\002error:\002 action does not apply to text entries."; return; }
-        set theaction "V";
+        set theaction "V"; set tn 4
     } elseif {$action eq "op" || $action eq "o"} {
         if {$method eq "text"} { reply $type $target "\002error:\002 action does not apply to text entries."; return; }
-        set theaction "O";
+        set theaction "O"; set tn 4
     } elseif {$action eq "kick" || $action eq "kickban" || $action eq "ban" || $action eq "k" \
         || $action eq "kb" || $action eq "b"} {
         if {$method eq "text" && $list eq "white"} { reply $type $target "\002error:\002 this action does not apply to whitelist text entries."; return; }
-        set theaction "B";
-    } else {
-        # Action is missing or invalid for white/black lists
-        set usage 1;
-        set theaction ""; # Ensure theaction is defined
-        # Adjust index back if action was missing
-        set tn [expr $reason_start_idx -1]
-    }
+        set theaction "B"; set tn 4    
+    } else { set tn 3 }
 
-    # Check for limit argument next
-    set limit_arg [lindex $arg $tn]
-    if {[regexp -- {^(\d+):(\d+)(?::(\d+))?$} $limit_arg -> joins secs hold]} {
-        if {$list eq "white" || ($method ni {host regex text})} {
+    if {[regexp -- {^(\d+):(\d+)(?::(\d+))?$} [lindex $arg 4] -> joins secs hold] || [regexp -- {^(\d+):(\d+)(?::(\d+))?$} [lindex $arg 3] -> joins secs hold]} {
+        if {[regexp -- {^(\d+):(\d+)(?::(\d+))?$} [lindex $arg 4]]} { set tn 5 } else { set tn 4 }
+        if {$list eq "white" || ($method ne "host" && $method ne "regex" && $method ne "text")} {
             reply $type $target "\002(\002error\002)\002 joinflood limit settings only relevant for host, regex, and text blacklist types";
             return;
         }
-        incr tn; # Increment index because limit was found
         if {$hold eq ""} { set hold $secs }
         set origlimit "$joins:$secs:$hold"
         if {$secs eq $hold} { set newlimit "$joins:$secs" } else { set newlimit $origlimit }
@@ -6774,54 +6727,51 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         set reason [lrange $arg $tn end]
     } else {
         set limit "1:1:1"
-        set reason [lrange $arg $tn end] ; # Reason starts from current index tn
+        if {$ischan} {
+            set reason [lrange $arg [expr $tn + 1] end]
+        } else {
+            set reason [lrange $arg $tn end]
+        }
     }
 
-
-    # --- Final check for missing arguments for white/black lists ---
-    if {$usage || $value eq "" || $method eq ""} {
+    if {($candronebl || $canircbl) && ($value eq "" || $method eq "")} {
+        reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[comment\]"
+        return;  
+    } elseif {$value eq "" || $method eq ""} {
         reply $stype $starget $syntax
         return;
     }
-    # --- End final check ---
-
 
     if {$method eq "asn"} {
         if {[string match -nocase "AS*" $value]} { set value [string range $value 2 end]};
     }
 
-    debug 3 "arm:cmd:add: chan: $chan -- list: $list -- method: $method -- value: $value -- action: $theaction -- limit: $limit -- reason: $reason"
+    debug 3 "arm:cmd:add: chan: $chan -- list: $list -- method: $method -- value: $value -- action: $action -- limit: $limit -- reason: $reason"
 
-    if {$method eq "regex" || $method eq "text" || $method eq "rname"} {
+    if {$method eq "regex" || $method eq "text" || $method eq "rname"} {        
         if {$method eq "regex"} {
             catch { regexp -- $value "nick!user@host/rname" } err
             if {$err ne 0} {
                 debug 1 "arm:cmd:add: pattern $value is not a regular expression.";
                 reply $type $target "\002error:\002 $err"
                 return;
-            }
+            }    
         }
     }
 
     set islast 0
     if {$method eq "last"} {
         if {![info exists data:lasthosts($chan)]} { reply $type $target "error: no hosts in memory."; return; }
-         if {![string is integer -strict $value] || $value < 1} {
-             reply $type $target "\002error:\002 last value must be a positive integer."; return;
-         }
         set islast 1; set method "host"
-        set max_last [llength [get:val data:lasthosts $chan]]
-        if {$value > $max_last} { $value = $max_last } ; # Don't try to get more than available
-        set loop [lrange [get:val data:lasthosts $chan] 0 [expr $value - 1]]
-    } else {
-        if {$method ni {regex rname text}} { set loop [split $value ,] } else { set loop $value }
+        set loop [lrange [get:val data:lasthosts $chan] 0 [expr $value - 1]] 
+    } else { 
+        if {$method ne "regex" && $method ne "rname" && $method ne "text"} { set loop [split $value ,] } else { set loop $value }
     }
 
-
     foreach tvalue $loop {
-        debug 0 "\002arm:cmd:add\002: tvalue: $tvalue -- loop: $loop" # Corrected value here
+        debug 0 "\002arm:cmd:add\002: tvalue: $value -- loop: $loop"
         set exists 0
-        if {$method eq "host" && [regexp -- [cfg:get xregex *] $tvalue -> xuser] } {
+        if {[regexp -- [cfg:get xregex *] $tvalue -> xuser] && $method eq "host"} {
             set method "user"; set value $xuser
         } else {
             if {$islast} {
@@ -6830,30 +6780,21 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
             set value $tvalue
         }
 
-
         if {[string index $value 0] eq "="} {
             set value [string range $value 1 end]
             set lvalue [string tolower $value]
-            set method "user" ; # Change method to user for account lookup
+            set method "xuser"
             set dowho 1
             if {[dict exists $nickdata $lvalue account]} {
                 set value [dict get $nickdata $lvalue account]
                 if {$value eq ""} { set dowho 1 } else { set dowho 0 }
-            }
+            } 
             if {$dowho eq 1} {
-                 # Check if the nick is even online
-                 set online_check [getchanhost $value]
-                 if {$online_check eq ""} {
-                     reply $type $target "\002error:\002 Nick '$value' not found online to retrieve account."
-                     continue;
-                 }
                 set corowho($lvalue) [info coroutine]
                 putquick "WHO $value n%nuhiartf,104";
                 set ovalue $value
-                set who_result [yield]
-                lassign $who_result who_ip who_xuser who_rname ; # Get xuser from WHO result
-                set value $who_xuser ; # Use the account name (xuser) as the value
-                debug 0 "\002cmd:add:\002 received account value for $ovalue from WHO: $value"
+                set value [yield]
+                debug 0 "\002cmd:add:\002 received account value for $value from WHO: $value"
                 unset corowho($lvalue)
             }
             if {$value eq 0 || $value eq ""} {
@@ -6865,32 +6806,36 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         if {$method eq "country"} { set value [string toupper $value ]};
 
         if {$list eq "white"} {
-            set prefix "W"
+            set list "white"; set prefix "W"
             set limit "1:1:1";
             if {$reason eq ""} { set reason [cfg:get def:wreason $chan] }
-            if {[string index [string toupper $theaction] 0] eq "A"} { set action "A"; set action_str "accept" } \
-            elseif {[string index [string toupper $theaction] 0] eq "V"} { set action "V"; set action_str "voice" } \
-            elseif {[string index [string toupper $theaction] 0] eq "O"} { set action "O"; set action_str "op" } \
-            else { set action "A"; set action_str "accept" } # Default
+            if {[string index [string toupper $action] 0] eq "A"} { set action "A"; set theaction "accept" } \
+            elseif {[string index [string toupper $action] 0] eq "V"} { set action "V"; set theaction "voice" } \
+            elseif {[string index [string toupper $action] 0] eq "O"} { set action "O"; set theaction "op" } \
+            else { set action "A"; set theaction "accept" }
 
         } elseif {$list eq "black"} {
-            set prefix "B"
+            set list "black"; set prefix "B"
             if {$reason eq ""} { set reason [cfg:get def:breason $chan] };
-            if {[string index [string toupper $theaction] 0] eq "B"} { set action "B"; set action_str "kickban" } \
-            else { set action "B"; set action_str "kickban" } # Default
+            if {[string index [string toupper $action] 0] eq "B"} { set action "B"; set theaction "kickban" } \
+            else { set action "B"; set theaction "kickban" }
         } else {
-             # Should not happen due to earlier checks, but good safety net
-             reply $stype $starget $syntax
-             return;
+            if {($candronebl || $canircbl) && ($value eq "" || $method eq "")} {
+                reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[comment\]"
+                return;  
+            } elseif {$value eq "" || $method eq ""} {
+                reply $stype $starget $syntax
+                return;
+            }
+            continue;
         }
 
         set id [lindex [dict filter $entries script {id dictData} {
             expr {[dict get $dictData chan] eq $chan && [dict get $dictData type] eq $list \
                 && [dict get $dictData method] eq $method && [dict get $dictData value] eq $value}
         }] 0]
-
         if {$id ne ""} {
-            set flags 0; # Flags aren't added via 'add', only 'mod'
+            set flags 0;
             set iaction [dict get $entries $id action]
             set ilimit [dict get $entries $id limit]
             set iflags [dict get $entries $id flags]
@@ -6899,15 +6844,15 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
             if {$action eq $iaction && $limit eq $ilimit && $flags eq $iflags} {
                 reply $type $target "\002error:\002 a matching ${list}list entry with identical behaviour already exists. (\002id:\002 $id -- \002type:\002 $method -- \002value:\002 $value)";
-                continue; # Continue to next value in loop if needed
+                return;        
             }
-         }
+        }
 
         if {[cfg:get list:host:convert] eq 1} {
             if {$method eq "host"} {
                 if {![isValidIP $value]} {
-                    set ip_resolved [lindex [dns:lookup $value] 0]
-                    if {$ip_resolved ne "NULL" && $ip_resolved ne "" && $ip_resolved ne "error"} { set value $ip_resolved }
+                    set ip [lindex [dns:lookup $value] 0]
+                    if {$ip eq "NULL" || $ip eq ""} { set value $value } else { set value $ip }
                 }
             }
         }
@@ -6922,91 +6867,49 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
         if {$method eq "text"} {
             if {$list eq "black"} {
-                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${action_str}${textlimit}-- \002reply:\002 [join $reason])"
+                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reply:\002 [join $reason])"
             } else {
                 reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002reply:\002 [join $reason])"
             }
         } else {
-            reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${action_str}${textlimit}-- \002reason:\002 [join $reason])"
+            reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reason:\002 [join $reason])"
         }
 
-
-        # --- Auto-ban logic ---
         set tchans [list]
         if {$chan ne "*"} {
             set tchans $chan
         } else {
             foreach tcid [dict keys $dbchans] {
-                 if {$tcid == 1} continue ; # Skip global channel ID
-                 lappend tchans [dict get $dbchans $tcid chan]
+                lappend tchans [dict get $dbchans $tcid chan]
             }
         }
-
         set xhostext [cfg:get xhost:ext *]
-
-        foreach tchan_loop $tchans {
-             if {$action eq "B" && [cfg:get ban:auto $tchan_loop]} { # Check if action is Kickban
-                 set addban 0
-                 set ban_mask ""
-
-                 if {$method eq "user"} {
-                     # Ban based on xuser@vhost extension
-                     if {$xhostext ne ""} {
-                         set ban_mask "*!*@$value.$xhostext";
-                         set addban 1
-                     } else {
-                        debug 1 "arm:cmd:add: Cannot auto-ban user '$value' in $tchan_loop: cfg(xhost:ext) is not set."
-                     }
-                 } elseif {$method eq "host"} {
-                    # Ban based on host or IP
-                    if {[regexp -- {\*} $value]} {
-                        set ban_mask $value; # Use mask directly
-                    } else {
-                        set ban_mask "*!*@$value"; # Create wildcard mask
-                    }
+        foreach tchan $tchans {
+            if {$tchan eq "*"} { continue; }
+            if {$theaction eq "kickban" && [cfg:get ban:auto $tchan]} {
+                set hit 0
+                set addban 0
+                if {$method eq "user"} { set mask "*!*@$tvalue.$xhostext"; set addban 1 }
+                if {$method eq "host"} {
+                    if {[regexp -- {\*} $tvalue]} { set mask $tvalue } else { set mask "*!*@$tvalue" }
                     set addban 1
-                 }
-
-                 if {$addban && $ban_mask ne ""} {
-                    set hit 0
-                    set lchan_loop [string tolower $tchan_loop]
-
-                    # Find nicks on the channel matching the value (for host/ip bans)
-                    set nicks_to_kick [list]
-                    if {$method eq "host"} {
-                        if {[info exists data:hostnicks($value,$lchan_loop)]} {
-                            foreach hnick [get:val data:hostnicks $value,$lchan_loop] {
-                                if {[onValidchan $hnick $tchan_loop]} { # Check if still on channel
-                                    lappend nicks_to_kick $hnick
-                                    incr hit
-                                }
-                            }
+                }
+                if {$addban} {
+                    set lchan [string tolower $tchan]
+                    if {[info exists data:hostnicks($tvalue,$lchan)]} {
+                        foreach i [get:val data:hostnicks $tvalue,$lchan] {
+                            incr hit
+                            lassign [split [getchanhost $i] @] ident host
+                            kickban $i $ident $host $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
                         }
-                    } elseif {$method eq "user"} {
-                         # Find nick associated with the user account if online
-                         set current_nick [userdb:user:get nick account $value]
-                         if {$current_nick ne "" && [onValidchan $current_nick $tchan_loop]} {
-                             lappend nicks_to_kick $current_nick
-                             incr hit
-                         }
                     }
-
-                    # Perform kickban
-                    if {$hit > 0} {
-                        # Kick specific nicks matching the criteria
-                        foreach kick_nick $nicks_to_kick {
-                             lassign [split [getchanhost $kick_nick $tchan_loop] @] k_ident k_host
-                             kickban $kick_nick $k_ident $k_host $tchan_loop [cfg:get ban:time $tchan_loop] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
-                        }
-                    } else {
-                        # No specific nicks found matching, apply the ban mask directly
-                        kickban 0 $ban_mask 0 $tchan_loop [cfg:get ban:time $tchan_loop] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
+                    if {!$hit} {
+                        kickban 0 $mask 0 $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
                     }
-                 }
-             }
+                }
+            }
         }
-        # --- End Auto-ban logic ---
-    } # End foreach tvalue loop
+    }
 
     log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] "$log" "$source" "" "" ""
     return;
