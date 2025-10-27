@@ -32,17 +32,10 @@ if {[catch {package require dns} 0]} {
 
 namespace eval dronebl {
 
-# ** MODIFIED key PROCEDURE (with DEBUG) **
 # returns value set for rpckey by getting it from the Armour config
 proc key {} {
     # MODIFIED: Get the key from Armour's config system.
-    set key_value [::arm::cfg:get dronebl:key]
-    # ADDED DEBUG: Log the retrieved key (obscure partially for safety)
-    set log_key [string range $key_value 0 3]...[string range $key_value end-3 end]
-    if {$key_value eq ""} { set log_key "<EMPTY>" }
-    putlog "\002\[DEBUG dronebl::key\]:\002 Retrieved key: $log_key"
-    # END DEBUG
-    return $key_value
+	return [::arm::cfg:get dronebl:key]
 }
 
 # prepares ::http::config headers
@@ -70,62 +63,27 @@ proc host2ip {ip {host 0} {status 0} {attempt 0}} {
 	}
 }
 
-# ** MODIFIED talk PROCEDURE (with HTTP ERROR HANDLING) **
 # performs a connection to the DroneBL RPC2 service and returns the response
 proc talk { query } {
-    [namespace current]::setHTTPheaders
-    ::http::register https 443 tls::socket
-    # Add timeout to prevent hanging indefinitely
-    set http [::http::geturl "https://dronebl.org/rpc2" -type "text/xml" -query $query -timeout 5000]
-    set data [::http::data $http]
-    set status [::http::status $http]
-    set ncode [::http::ncode $http]
-    # Clean up regardless of status
-    catch {::http::cleanup $http}
-    catch {::http::unregister https}
-
-    if {$status ne "ok"} {
-        # If status isn't ok, set an error and return empty
-        [namespace current]::lasterror "HTTP Error connecting to DroneBL: Status '$status', Code '$ncode'"
-        return ""
-    } elseif {$data eq ""} {
-        # Handle cases where status is ok but data is empty (less likely but possible)
-        [namespace current]::lasterror "Received empty data from DroneBL API (Status: $status, Code: $ncode)."
-        return ""
-    }
-    return $data ; # Return data only if status was ok and data wasn't empty
+	[namespace current]::setHTTPheaders
+	::http::register https 443 tls::socket
+	set http [::http::geturl "https://dronebl.org/rpc2" -type "text/xml" -query $query]
+	set data [::http::data $http]
+	::http::unregister https
+	return $data
 }
 
-# ** MODIFIED lasterror PROCEDURE (with DEBUG) **
 # keeps track of the last error
 proc lasterror {args} {
 	global [namespace current]::err
 	if {![info exists [namespace current]::err]} { set [namespace current]::err "" }
-	if {$args != ""} {
-        # ADDED DEBUG: Log when error is set
-        putlog "\002\[DEBUG dronebl::lasterror\]:\002 Setting error to: '$args'"
-        # END DEBUG
-		set [namespace current]::err $args
-	}
+	if {$args != ""} { set [namespace current]::err $args }
 	namespace upvar [namespace current] err _err
-    # ADDED DEBUG: Log when error is retrieved (Optional - can be noisy)
-    # putlog "\002\[DEBUG dronebl::lasterror\]:\002 Returning error: '$_err'"
-    # END DEBUG
 	return [concat $_err]
 }
 
-# ** MODIFIED checkerrors PROCEDURE (with EMPTY CHECK) **
 # parses DroneBL response for errors; returns true if none, false if errors found + populates lasterror
 proc checkerrors {args} {
-    # ADD THIS BLOCK to handle empty input from talk proc
-    if {$args eq ""} {
-        # Don't overwrite lasterror if talk already set one (like HTTP Error)
-        if {[string trim [[namespace current]::lasterror]] eq ""} {
-             [namespace current]::lasterror "Received empty or invalid response from DroneBL API."
-        }
-        return false
-    }
-    # END OF ADDED BLOCK - rest of the proc remains the same
 	if {[string match "*success*" $args]} {
 		return true
 	} else {
@@ -139,20 +97,13 @@ proc checkerrors {args} {
 	}
 }
 
-# ** MODIFIED submit PROCEDURE (with DEBUG and EMPTY LIST FIX) **
 # generates query for submitting a host / IP to the DroneBL service
 proc submit { hosts } {
 	set key [[namespace current]::key]
-	if {$key == ""} {
+	if {$key == ""} { 
         [namespace current]::lasterror "DroneBL RPC Key is not set in armour.conf."
-        # ADDED DEBUG: Log key check failure
-        putlog "\002\[DEBUG dronebl::submit\]:\002 Failing because key is empty."
-        # END DEBUG
-        return false
+        return false 
     }
-    # ADDED DEBUG: Log entry point
-    putlog "\002\[DEBUG dronebl::submit\]:\002 Starting submit for hosts: '$hosts'"
-    # END DEBUG
 
 	set query "<?xml version=\"1.0\"?>
 <request key=\"$key\">"
@@ -164,22 +115,8 @@ proc submit { hosts } {
 		set hosts [lreplace $hosts 0 0]
 	}
 
-    # Trim empty elements from the list after potential type removal
-    set hosts [lsearch -all -inline -not -exact $hosts ""] ; # <<< FIX IS HERE
-
 	foreach host $hosts {
-        # ADDED DEBUG: Before host2ip
-        putlog "\002\[DEBUG dronebl::submit\]:\002 Calling host2ip for host: '$host'"
-        # END DEBUG
-		if {[set ip [[namespace current]::host2ip $host]] == 0} {
-             # ADDED DEBUG: Log host2ip failure
-             putlog "\002\[DEBUG dronebl::submit\]:\002 host2ip failed for '$host'. Current lasterror: '[[namespace current]::lasterror]'"
-             # END DEBUG
-             return false
-         }
-        # ADDED DEBUG: After host2ip success
-        putlog "\002\[DEBUG dronebl::submit\]:\002 host2ip succeeded for '$host', result IP: '$ip'"
-        # END DEBUG
+		if {[set ip [[namespace current]::host2ip $host]] == 0} { return false }
 		foreach ip1 [split $ip] {
 			set query "$query
 	<add ip=\"$ip1\" $bantype />"
@@ -189,22 +126,15 @@ proc submit { hosts } {
 	set query "$query
 </request>"
 
-    # ADDED DEBUG: Before talk
-    putlog "\002\[DEBUG dronebl::submit\]:\002 Calling talk with query:\n$query"
-    # END DEBUG
-    set response [[namespace current]::talk $query]
-    # ADDED DEBUG: After talk
-    putlog "\002\[DEBUG dronebl::submit\]:\002 Response from talk: '$response'"
-    # END DEBUG
-	return [[namespace current]::checkerrors $response]
+	return [[namespace current]::checkerrors [[namespace current]::talk $query]]
 }
 
 # generates query for setting an IP inactive in the DroneBL service
 proc remove { ids } {
 	set key [[namespace current]::key]
-	if {$key == ""} {
+	if {$key == ""} { 
         [namespace current]::lasterror "DroneBL RPC Key is not set in armour.conf."
-        return false
+        return false 
     }
 
 	set query "<?xml version=\"1.0\"?>
@@ -243,7 +173,7 @@ proc lookup { ips } {
 	set key [[namespace current]::key]
 	if {$key == ""} {
         [namespace current]::lasterror "DroneBL RPC Key is not set in armour.conf."
-        return false
+        return false 
     }
 
 	set switches [lsearch -all -regexp -inline $ips {^-+.*}]
