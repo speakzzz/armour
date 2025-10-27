@@ -6645,6 +6645,17 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
     set syntax "\002usage:\002 add ?chan? <white|black${xtra1}> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? $xtra2"
 
+	# Check for missing value or method FIRST for general usage
+    if {$value eq "" || $method eq ""} {
+        # This condition is met when only "add" is typed
+        if {$list ne "dronebl" && $list ne "ircbl"} {
+             # If it's not an RBL command, show the general syntax
+            reply $stype $starget $syntax
+            return;
+        }
+        # If it IS an RBL command but args are missing, let the RBL block handle it
+    }
+
     if {$list eq "dronebl" || $list eq "ircbl"} {
         # --- THIS IS THE NEW, CRITICAL CHECK ---
         if {[info commands ::dronebl::submit] == ""} {
