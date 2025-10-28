@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025102700"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025102800"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -16956,8 +16956,8 @@ proc ipqs:cmd:ipqs {0 1 2 3 {4 ""} {5 ""}} {
 
     # -- special handling for errors
     if {$match -1} {
-        set error [lindex $output 1]
-        reply $type $target "\002error\002: $out(message)";
+        set error_message [lindex $output 1]  # Get the error message from the returned list
+        reply $type $target "\002error\002: [join $error_message]" # Print the extracted message
         return;
     }
 
