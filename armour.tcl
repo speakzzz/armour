@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025103000"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025102802"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -1345,7 +1345,8 @@ db:query "CREATE TABLE IF NOT EXISTS web_sessions (
     )"
 
 # -- cronjob to periodically delete expired web sessions
-bind cron - "0 */6 * * *" {arm::coroexec arm::web::cleanup_sessions}
+#bind cron - "0 */6 * * *" {arm::coroexec arm::web::cleanup_sessions}
+bind cron - "0 */6 * * *" arm::web::cleanup_sessions
 
 # -- providing a mechanism to manage DB upgrade and migration between script versions
 proc db:upgrade {} {
