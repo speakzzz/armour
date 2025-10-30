@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025082602"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2025102802"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -6644,6 +6644,17 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     } else { set xtra2 " \[reason\]" }
 
     set syntax "\002usage:\002 add ?chan? <white|black${xtra1}> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? $xtra2"
+
+	# Check for missing value or method FIRST for general usage
+    if {$value eq "" || $method eq ""} {
+        # This condition is met when only "add" is typed
+        if {$list ne "dronebl" && $list ne "ircbl"} {
+             # If it's not an RBL command, show the general syntax
+            reply $stype $starget $syntax
+            return;
+        }
+        # If it IS an RBL command but args are missing, let the RBL block handle it
+    }
 
     if {$list eq "dronebl" || $list eq "ircbl"} {
         # --- THIS IS THE NEW, CRITICAL CHECK ---
@@ -16944,9 +16955,9 @@ proc ipqs:cmd:ipqs {0 1 2 3 {4 ""} {5 ""}} {
     debug 3 "\002ipqs:cmd:ipqs:\002 ip: $ip -- match: $match -- isfraud: $isfraud -- isproxy: $isproxy -- fraud_score: $fraud_score"
 
     # -- special handling for errors
-    if {$match -1} {
-        set error [lindex $output 1]
-        reply $type $target "\002error\002: $out(message)";
+    if {$match == -1} {                  # <-- Use == for numeric comparison
+        set error_message [lindex $output 1]  # Get the error message from the returned list
+        reply $type $target "\002error\002: [join $error_message]" # Print the extracted message
         return;
     }
 
