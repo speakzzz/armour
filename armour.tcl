@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025103000"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026021000"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -5874,7 +5874,7 @@ proc arm:cmd:search {0 1 2 3 {4 ""} {5 ""}} {
 
     # -- check for channel
     set first [lindex $arg 0]; set anychan 0;
-    if {([string index $first 0] eq "#" && [string match "\*" $first] ne 1) || $first eq "*" || [string index $first 0] eq "?"} {
+    if {[string index $first 0] eq "#" || $first eq "*" || [string index $first 0] eq "?"} {
         # -- '*' denotes global entries
         # -- '?' denotes any entry channel
         if {[string index $first 0] eq "?"} { set anychan 1 }
