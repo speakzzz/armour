@@ -1032,7 +1032,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026021000"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092000"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -2342,57 +2342,93 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- IPv4 and IPv6 support for CIDR match
-proc cidr:match {ip cidr} {
-    if {![regexp -- {([^/]+)/(\d+)$} $cidr -> net prefix]} { return 0; }; # not CIDR notation
-    
-    set ipIsV6 [expr {[string first ":" $ip] != -1}]
-    set netIsV6 [expr {[string first ":" $net] != -1}]
 
-    if {$ipIsV6 != $netIsV6} { return 0 } ;# IP version mismatch
+# -- convert an IPv6 address to a 128-bit binary string; returns "" if invalid
+proc ipv6_to_binary {addr} {
+    # -- only one "::" is legal
+    if {[regexp -all -- {::} $addr] > 1} { return "" }
 
-    if {$ipIsV6} {
-        # IPv6 Logic
-        if {$prefix > 128} { return 0 }
-        set ipBin [ipv6_to_binary $ip]
-        set netBin [ipv6_to_binary $net]
+    # -- split into the halves either side of "::"
+    if {[string first "::" $addr] != -1} {
+        set idx [string first "::" $addr]
+        set head [string range $addr 0 [expr {$idx - 1}]]
+        set tail [string range $addr [expr {$idx + 2}] end]
+        set hgroups [expr {$head eq "" ? [list] : [split $head ":"]}]
+        set tgroups [expr {$tail eq "" ? [list] : [split $tail ":"]}]
     } else {
-        # IPv4 Logic
-        if {$prefix > 32} { return 0 }
-        binary scan [binary format c4 [split $ip .]] B32 ipBin
-        binary scan [binary format c4 [split $net .]] B32 netBin
+        set hgroups [split $addr ":"]
+        set tgroups [list]
     }
-    
-    if {$ipBin eq "" || $netBin eq ""} { return 0 } ;# Conversion failed
-    
-    return [expr {[string range $ipBin 0 [expr {$prefix - 1}]] eq [string range $netBin 0 [expr {$prefix - 1}]]}]
+
+    # -- expand a trailing IPv4-mapped form (e.g. ::ffff:192.168.1.1)
+    set last [lindex [concat $hgroups $tgroups] end]
+    if {$last ne "" && [string first "." $last] != -1} {
+        if {![regexp -- {^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} $last -> a b c d]} { return "" }
+        foreach o [list $a $b $c $d] { if {$o > 255} { return "" } }
+        set v4 [list [format %x [expr {($a << 8) | $b}]] [format %x [expr {($c << 8) | $d}]]]
+        if {[llength $tgroups]} {
+            set tgroups [concat [lrange $tgroups 0 end-1] $v4]
+        } else {
+            set hgroups [concat [lrange $hgroups 0 end-1] $v4]
+        }
+    }
+
+    # -- how many zero groups does "::" stand in for?
+    set have [expr {[llength $hgroups] + [llength $tgroups]}]
+    if {[string first "::" $addr] != -1} {
+        set fill [expr {8 - $have}]
+        if {$fill < 1} { return "" }
+    } else {
+        if {$have != 8} { return "" }
+        set fill 0
+    }
+
+    set groups $hgroups
+    for {set i 0} {$i < $fill} {incr i} { lappend groups 0 }
+    set groups [concat $groups $tgroups]
+
+    # -- render each group as 16 bits, validating as we go
+    set bits ""
+    foreach g $groups {
+        if {![regexp -- {^[0-9a-fA-F]{1,4}$} $g]} { return "" }
+        scan $g %x val
+        append bits [format %016b $val]
+    }
+    if {[string length $bits] != 128} { return "" }
+    return $bits
 }
 
-# FINAL CORRECTED VERSION
-proc ipv6_to_binary {ipv6_addr} {
-    set expanded_addr $ipv6_addr
-    # Check for and expand "::" notation
-    if {[string first "::" $expanded_addr] != -1} {
-        set num_colons [expr {[string length [regsub -all {[^:]} $expanded_addr ""]]}]
-        set num_to_add [expr {7 - $num_colons}]
-        set replacement_str ":"
-        for {set i 0} {$i < $num_to_add} {incr i} {
-            append replacement_str "0:"
-        }
-        set expanded_addr [regsub -- "::" $expanded_addr $replacement_str]
-        # Handle edge cases like :: at the beginning or end
-        if {[string index $expanded_addr 0] eq ":"} { set expanded_addr "0$expanded_addr" }
-        if {[string index $expanded_addr end] eq ":"} { set expanded_addr "${expanded_addr}0" }
+# -- convert an IPv4 address to a 32-bit binary string; returns "" if invalid
+proc ipv4_to_binary {addr} {
+    if {![regexp -- {^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} $addr -> a b c d]} { return "" }
+    foreach o [list $a $b $c $d] { if {$o > 255} { return "" } }
+    binary scan [binary format c4 [list $a $b $c $d]] B32 bits
+    return $bits
+}
+
+# -- does $ip fall inside $cidr?
+proc cidr:match {ip cidr} {
+    if {![regexp -- {^([^/]+)/(\d+)$} $cidr -> net prefix]} { return 0 }; # not CIDR notation
+
+    set ipIsV6  [expr {[string first ":" $ip]  != -1}]
+    set netIsV6 [expr {[string first ":" $net] != -1}]
+
+    if {$ipIsV6 != $netIsV6} { return 0 };# IP version mismatch
+
+    if {$ipIsV6} {
+        if {$prefix > 128} { return 0 }
+        set ipBin  [ipv6_to_binary $ip]
+        set netBin [ipv6_to_binary $net]
+    } else {
+        if {$prefix > 32} { return 0 }
+        set ipBin  [ipv4_to_binary $ip]
+        set netBin [ipv4_to_binary $net]
     }
 
-    # Build the final 128-bit binary string
-    set binary_str ""
-    foreach group [split $expanded_addr ":"] {
-        if {$group eq ""} { set group "0" }
-        set decimal "0x$group"
-        set bin [format %016b $decimal]
-        append binary_str $bin
-    }
-    return $binary_str
+    if {$ipBin eq "" || $netBin eq ""} { return 0 };# conversion failed or invalid input
+    if {$prefix == 0} { return 1 };# /0 matches everything in the same family
+
+    return [expr {[string range $ipBin 0 [expr {$prefix - 1}]] eq [string range $netBin 0 [expr {$prefix - 1}]]}]
 }
 
 putlog "\[@\] Armour: loaded CIDR matching procedure."
@@ -2423,19 +2459,22 @@ proc geo:ip2data {ip} {
     # -- asynchronous lookup via coroutine
     set answer [dns:lookup $revip.$domain TXT]
     
-    # -- example:
-    # 7545 | 123.243.188.0/22 | AU | apnic | 2007-02-14
-    
-    if {$answer eq ""} { return; }
-    set string [split $answer " | "]
-    # 7545 {} {} 123.243.188.0/22 {} {} AU {} {} apnic {} {} 2007-02-14
-    set asn [lindex $string 0]
-    set subnet [lindex $string 3]
-    set country [lindex $string 6]
-    set rir [lindex $string 9]
-    set date [lindex $string 12]
+    if {$answer eq ""} { return "" }
+
+    # -- example: 7545 | 123.243.188.0/22 | AU | apnic | 2007-02-14
+    # -- note the first field may list several origin ASNs: "7545 1221 | ..."
+    # -- split on the pipe only; splitting on " | " treats it as a character set
+    set fields {}
+    foreach f [split $answer "|"] { lappend fields [string trim $f] }
+    if {[llength $fields] < 5} {
+        debug 1 "\002geo:ip2data\002: unexpected response for $ip: $answer"
+        return ""
+    }
+    lassign $fields asnlist subnet country rir date
+    set asn [lindex $asnlist 0]; # -- first origin ASN where several are announced
+
     debug 3 "\002geo:ip2data\002: IP: $ip -- ASN: $asn -- subnet: $subnet -- country: $country -- rir: $rir -- date: $date"
-    return "$asn $country $subnet $rir $date"
+    return [list $asn $country $subnet $rir $date]
 }
 
 # -- reverse an IPv4 or IPv6 IP address
@@ -13301,7 +13340,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0; set plugin(weather) 0;
     if {[info commands quote:cron] ne ""} { set plugin(quote) 1; append setlist " quote quoterand" }; # -- quote
     if {[info commands arm:cmd:tweet] ne ""} { set plugin(twitter) 1; append setlist " tweet tweetquote" }; # -- tweet
-    if {[info commands ask:query] ne ""} { set plugin(openai) 1; append setlist " openai image imagerand" }; # -- openai
+    if {[info commands ask:query] ne "" || [info commands arm:cmd:ask] ne ""} { set plugin(openai) 1; append setlist " openai image imagerand" }; # -- openai
     if {[info commands speak:query] ne ""} { set plugin(speak) 1; append setlist " speak" }; # -- speak
     if {[info commands sing:query] ne ""} { set plugin(sing) 1; append setlist " sing" }; # -- sing
     if {[info commands video:query] ne ""} { set plugin(video) 1; append setlist " video" }; # -- video
@@ -15691,7 +15730,11 @@ proc userdb:deluser {user uid} {
     }    
 
     # -- deal with openai plugin
-    if {[info commands ask:query] ne ""} {
+    #if {[info commands ask:query] ne "" || [info commands arm:cmd:ask] ne ""} {
+    if {[info commands ask:query] ne "" || [info commands arm:cmd:ask] ne ""} {
+    set plugin(openai) 1
+    append setlist " openai image imagerand"
+}; # -- openai
         # -- openai plugin loaded
         #db:query "DELETE FROM openai WHERE user='$user'"
         #debug 3 "userdb:deluser: deleted openai entries from openai table (uid: $uid)"
@@ -20090,7 +20133,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- disable commands if 'openai' plugin not loaded
-if {[info commands ask:query] eq ""} {
+    if {([info commands ask:query] eq "" && [info commands arm:cmd:ask] eq "")} {
     if {[info exists addcmd(ask)]} { unset addcmd(ask) }
     if {[info exists addcmd(and)]} { unset addcmd(and) }
     if {[info exists addcmd(askmode)]} { unset addcmd(askmode) }
@@ -20102,7 +20145,7 @@ if {[cfg:get ask:model] eq "perplexity"} {
 }
 
 # -- disable commands if 'image' not enabled or openai plugin not loaded
-if {!$cfg(ask:image) || [info commands ask:query] eq ""} {
+    if {!$cfg(ask:image) || ([info commands ask:query] eq "" && [info commands arm:cmd:ask] eq "")} {
     if {[info exists addcmd(image)]} { unset addcmd(image) }
 }
 
