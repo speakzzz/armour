@@ -2343,8 +2343,9 @@ namespace eval arm {
 
 # -- IPv4 and IPv6 support for CIDR match
 
-# -- convert an IPv6 address to a 128-bit binary string; returns "" if invalid
-proc ipv6_to_binary {addr} {
+# -- expand an IPv6 address to a list of 8 four-digit hex groups; "" if invalid
+# -- shared by ipv6_to_binary (CIDR matching) and ip:reverse (DNSBL/geo lookups)
+proc ipv6:expand {addr} {
     # -- only one "::" is legal
     if {[regexp -all -- {::} $addr] > 1} { return "" }
 
@@ -2355,9 +2356,11 @@ proc ipv6_to_binary {addr} {
         set tail [string range $addr [expr {$idx + 2}] end]
         set hgroups [expr {$head eq "" ? [list] : [split $head ":"]}]
         set tgroups [expr {$tail eq "" ? [list] : [split $tail ":"]}]
+        set compressed 1
     } else {
         set hgroups [split $addr ":"]
         set tgroups [list]
+        set compressed 0
     }
 
     # -- expand a trailing IPv4-mapped form (e.g. ::ffff:192.168.1.1)
@@ -2365,7 +2368,7 @@ proc ipv6_to_binary {addr} {
     if {$last ne "" && [string first "." $last] != -1} {
         if {![regexp -- {^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} $last -> a b c d]} { return "" }
         foreach o [list $a $b $c $d] { if {$o > 255} { return "" } }
-        set v4 [list [format %x [expr {($a << 8) | $b}]] [format %x [expr {($c << 8) | $d}]]]
+        set v4 [list [format %04x [expr {($a << 8) | $b}]] [format %04x [expr {($c << 8) | $d}]]]
         if {[llength $tgroups]} {
             set tgroups [concat [lrange $tgroups 0 end-1] $v4]
         } else {
@@ -2375,7 +2378,7 @@ proc ipv6_to_binary {addr} {
 
     # -- how many zero groups does "::" stand in for?
     set have [expr {[llength $hgroups] + [llength $tgroups]}]
-    if {[string first "::" $addr] != -1} {
+    if {$compressed} {
         set fill [expr {8 - $have}]
         if {$fill < 1} { return "" }
     } else {
@@ -2384,17 +2387,25 @@ proc ipv6_to_binary {addr} {
     }
 
     set groups $hgroups
-    for {set i 0} {$i < $fill} {incr i} { lappend groups 0 }
+    for {set i 0} {$i < $fill} {incr i} { lappend groups 0000 }
     set groups [concat $groups $tgroups]
 
-    # -- render each group as 16 bits, validating as we go
-    set bits ""
+    # -- normalise each group to 4 hex digits, validating as we go
+    set out {}
     foreach g $groups {
         if {![regexp -- {^[0-9a-fA-F]{1,4}$} $g]} { return "" }
-        scan $g %x val
-        append bits [format %016b $val]
+        lappend out [format %04x [scan $g %x]]
     }
-    if {[string length $bits] != 128} { return "" }
+    if {[llength $out] != 8} { return "" }
+    return $out
+}
+
+# -- convert an IPv6 address to a 128-bit binary string; returns "" if invalid
+proc ipv6_to_binary {addr} {
+    set groups [ipv6:expand $addr]
+    if {$groups eq ""} { return "" }
+    set bits ""
+    foreach g $groups { append bits [format %016b [scan $g %x]] }
     return $bits
 }
 
@@ -2479,40 +2490,21 @@ proc geo:ip2data {ip} {
 
 # -- reverse an IPv4 or IPv6 IP address
 proc ip:reverse {ip} {
-    set reversed_ip ""
-    # -- check if IPv4 or IPv6
-    if {[regexp {^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$} $ip]} {
-        # -- IPv4 address
-        set ip_segments [split $ip "."]
-        set reversed_ip [join [lreverse $ip_segments] "."]
-        
-    } elseif {[regexp {^(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$} $ip]} {
-        # -- IPv6 address
-        set ip_segments [split $ip ":"]
-        set num_segments [llength $ip_segments]
-
-        # -- fill in missing zeros for :: notation
-        set index [lsearch -exact $ip_segments ""]
-        if {$index != -1} {
-            set num_missing_segments [expr 8 - $num_segments]
-            set ip_segments [lreplace $ip_segments $index $index {*}[lrepeat $num_missing_segments "0000"]]
-        }
-
-        # -- expand each segment to 4 characters and reverse
-        set expanded_ip_segments {}
-        foreach segment $ip_segments {
-            set expanded_segment [format %04s $segment]
-            lappend expanded_ip_segments [split $expanded_segment ""]
-        }
-
-        # -- interleave segments with "."
-        set reversed_ip [join [lreverse [concat {*}$expanded_ip_segments]] "."]
-    } else {
-        # -- invalid IP address
-        return;
+    # -- IPv4: reverse the octets
+    if {[regexp -- {^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} $ip -> a b c d]} {
+        foreach o [list $a $b $c $d] { if {$o > 255} { return "" } }
+        return [join [list $d $c $b $a] "."]
     }
-    if {$reversed_ip eq ""} { return; }; # -- safety net
-    return $reversed_ip
+
+    # -- IPv6: expand to 8 groups, then reverse the 32 nibbles
+    if {[string first ":" $ip] != -1} {
+        set groups [ipv6:expand $ip]
+        if {$groups eq ""} { return "" }
+        return [join [lreverse [split [join $groups ""] ""]] "."]
+    }
+
+    # -- invalid IP address
+    return ""
 }
 
 putlog "\[@\] Armour: loaded geolocation tools."
