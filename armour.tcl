@@ -345,13 +345,26 @@ foreach pkg $packages {
     }
 }
 
-# -- oathtool
+# -- normalise and decode a base32 TOTP secret, as issued by authenticator apps
+# -- accepts lowercase, embedded spaces or dashes, and missing "=" padding
+# -- returns the raw key bytes, or "" if the secret is not valid base32
+proc totp:secret {secret} {
+    if {[catch {package require base32}]} { return "" }; # -- tcllib, already required for sha1
+    set s [string toupper [regsub -all -- {[\s-]} $secret ""]]
+    set s [string trimright $s "="]
+    if {$s eq "" || ![regexp -- {^[A-Z2-7]+$} $s]} { return "" }
+    set pad [expr {(8 - [string length $s] % 8) % 8}]
+    append s [string repeat "=" $pad]
+    if {[catch {base32::decode $s} key]} { return "" }
+    return $key
+}
+
+# -- TOTP secret (generated in-tree via onetimepass; oathtool is no longer required)
 if {[cfg:get auth:totp *] ne ""} {
-    debug 0 "\[@\] Armour: checking for \002oathtool\002 ..."
-    set oathtool [lindex [exec whereis oathtool] 1]
-    if {$oathtool eq ""} {
-        debug 0 "\[@\] Armour: \x0304(error)\x03 \002oathtool\002 not found, cannot generate TOTP token. \002Try:\002 sudo $pkgManager $pkg_oathtool"
-        putnotc [cfg:get chan:report] "Armour: \002oathtool\002 not found, cannot generate TOTP token. \002Try:\002 sudo $pkgManager $pkg_oathtool"
+    debug 0 "\[@\] Armour: checking \002auth:totp\002 secret ..."
+    if {[totp:secret [cfg:get auth:totp *]] eq ""} {
+        debug 0 "\[@\] Armour: \x0304(error)\x03 \002auth:totp\002 is not a valid base32 secret (or tcllib base32 is missing) -- TOTP login will fail"
+        putnotc [cfg:get chan:report] "Armour: \002auth:totp\002 is not a valid base32 secret (or tcllib base32 is missing) -- TOTP login will fail"
     }
 }
 
@@ -1032,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092000"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092100"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -2736,13 +2749,13 @@ proc auth:attempt {} {
     set thepass [cfg:get auth:pass *]
 
     if {[cfg:get auth:totp *] ne "" && [cfg:get auth:mech] eq "gnuworld" && [cfg:get ircd] eq "1"} {
-        #set thetoken [onetimepass::get_totp [cfg:get auth:totp *]]
-        set oathtool [lindex [exec whereis oathtool] 1]
-        if {$oathtool eq ""} {
-            debug 0 "\[@\] Armour: \002(error)\002 oathtool not found, cannot generate TOTP token. \002Try:\002 sudo $pkgManager $pkg_oathtool"
+        # -- generate in-tree: no external process, and the secret never appears on a command line
+        set key [totp:secret [cfg:get auth:totp *]]
+        if {$key eq ""} {
+            debug 0 "\[@\] Armour: \002(error)\002 auth:totp is not a valid base32 secret, cannot generate TOTP token"
             return;
         }
-        set thetoken [exec $oathtool --totp [cfg:get auth:totp *]]
+        set thetoken [onetimepass::get_totp $key]
         append thepass " $thetoken"
     }
     
