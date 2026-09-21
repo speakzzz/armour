@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092100"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092101"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -8821,7 +8821,7 @@ proc raw:join {nick uhost hand chan} {
         # -- build list to use at /endofwho
         debug 3 "\002raw:join:\002 appending to scan:list(data,$lchan): \002nick:\002 $nick -- \002chan:\002 $chan -- \002clicks: $start\002 -- \002ident:\002 $ident \
             -- \002ip:\002 $ip -- \002host:\002 $host -- \002xuser:\002 $xuser -- \002rname:\002 $rname"
-        lappend scan:list(data,$lchan) "[list $nick] $chan 0 $start $ident $ip $host $xuser $rname"
+        lappend scan:list(data,$lchan) "[list $nick] $chan 0 $start $ident $ip $host $xuser [list [join $rname]]"
 
         # -- end paste
         
@@ -9071,8 +9071,16 @@ proc raw:genwho {server cmd arg} {
         # -- IRCnet/EFnet
         #server    cmd    mynick type ident host server nick away :hopcount sid rname
         #irc.psychz.net    352    cori * _mxl    ipv4.pl    ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick chan ident host server nick flags hopcount sid
-        set rname [lrange $arg 10 end]
+        # -- parse as text, never as a Tcl list: the realname is user-controlled, and an
+        # -- unbalanced brace or quote in it made lassign/lrange throw, so the client was never scanned
+        set idx [string first " :" $arg]
+        if {$idx == -1} { debug 1 "\002raw:genwho:\002 malformed 352 (no trailing parameter): $arg"; return; }
+        set params [regexp -all -inline {\S+} [string range $arg 0 [expr {$idx - 1}]]]
+        if {[llength $params] < 7} { debug 1 "\002raw:genwho:\002 malformed 352 (too few parameters): $arg"; return; }
+        lassign $params mynick chan ident host server nick flags
+        # -- trailing parameter is: hopcount SID realname...  (the realname starts after the SID)
+        regexp -- {^(\S*)\s*(\S*)\s?(.*)$} [string range $arg [expr {$idx + 2}] end] -> hopcount sid rtext
+        set rname [regexp -all -inline {\S+} $rtext]
         # -- NOTE: the above raw example doesn't appear to provide an actual IP; do a DNS lookup (doh! this slows us down)
         if {![isValidIP $host]} {
             # -- only do this if it's not already an IPv4 IP
@@ -9287,7 +9295,7 @@ proc who {nick chan ident host ip flags xuser rname} {
         if {[info exists scan:full($chan,state)]} { set full 1 } else { set full 0 }
         debug 3 "who: appending to scan:list(data,$lchan): nick: $nick -- chan -- $chan -- full: $full -- clicks: $start -- ident: $ident -- ip: $ip -- host: $host -- xuser: $xuser -- rname: [join $rname]"
         lappend scan:list(nicks,$lchan) $nick
-        lappend scan:list(data,$lchan) "[list $nick] $chan $full $start $ident $ip $host $xuser [list $rname]"
+        lappend scan:list(data,$lchan) "[list $nick] $chan $full $start $ident $ip $host $xuser [list [join [join $rname]]]"
         #debug 3 "\002who: scan:list(data,$lchan):\002 [get:val scan:list data,$lchan]"
     }
 }
@@ -9416,10 +9424,9 @@ proc raw:endofwho {server cmd text} {
         lassign [split $cgroup ,] data lchan
         foreach i [get:val scan:list data,$lchan] {
             lassign $i nick chan full clicks ident ip host xuser
-            set rname [lrange $i 8 end]
+            set rname [lindex $i 8];  # -- both writers store the plain realname as one element
             if {$nick ni $leavelist} {
                 set lchan [join [lindex [split $cgroup ,] 1]]
-                set rname [list $rname]
                 debug 3 "raw:endofwho: sending arg to arm::scan: nick: $nick -- chan: $chan -- full: $full -- clicks: $clicks -- ident: $ident -- ip: $ip -- host: $host -- xuser: $xuser -- rname: $rname"
                 scan [list $nick] $chan $full $clicks $ident $ip $host $xuser $rname
             }
