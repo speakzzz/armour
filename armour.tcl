@@ -2394,7 +2394,7 @@ proc ipv6:expand {addr} {
     set out {}
     foreach g $groups {
         if {![regexp -- {^[0-9a-fA-F]{1,4}$} $g]} { return "" }
-        lappend out [format %04x [scan $g %x]]
+        lappend out [format %04x [::scan $g %x]]
     }
     if {[llength $out] != 8} { return "" }
     return $out
@@ -2405,7 +2405,7 @@ proc ipv6_to_binary {addr} {
     set groups [ipv6:expand $addr]
     if {$groups eq ""} { return "" }
     set bits ""
-    foreach g $groups { append bits [format %016b [scan $g %x]] }
+    foreach g $groups { append bits [format %016b [::scan $g %x]] }
     return $bits
 }
 
