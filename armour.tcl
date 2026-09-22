@@ -4333,7 +4333,11 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
         
     # -- check the var
     set count 0;
-    if {[cfg:get $var $chan] ne ""} {
+    # -- exact match if the setting exists (even when its value is empty, e.g. auth:pass=""),
+    # -- otherwise treat $var as a mask.  using [info exists] rather than [cfg:get] here avoids
+    # -- cfg:get raising a "config error" for a mask like *auth* and correctly routes empty-valued
+    # -- settings to the exact branch.
+    if {[info exists cfg($var)]} {
         if {!$desc} {
             # -- don't show config var description 
             # -- secrets are only shown over DCC; the protected list used to apply to masks only
