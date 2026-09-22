@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092101"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092200"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -4196,6 +4196,56 @@ proc arm:conftest {var} {
 #        conf <setting> [value]
 #        conf <setting> -out
 #        conf <setting> -desc
+# -- config settings whose values are secrets: never echoed over IRC, never listed by a mask.
+# -- the explicit list covers today's settings; the suffix rule covers keys added later.
+proc conf:sensitive {var} {
+    if {$var in {auth:pass auth:totp ask:token ask:org dronebl:key humour:key ipqs:key ircbl:key
+                 ninjas:key speak:key weather:key}} { return 1 }
+    return [regexp -- {:(key|pass|password|token|secret|totp)$} $var]
+}
+
+# -- render a value as a Tcl literal for a 'set cfg(...)' line.  the config file is Tcl source, so
+# -- a value written inside "..." that contains " [ $ or \ would run code the next time the bot
+# -- starts.  plain values keep the familiar "..." form; anything else is quoted with [list].
+proc conf:literal {value} {
+    if {[regexp -- {^\d+$} $value]} { return $value }
+    if {$value eq ""} { return {""} }
+    if {![regexp -- {["\\$\[\]{};]} $value]} { return "\"$value\"" }
+    return [list $value]
+}
+
+# -- replace every line of $path beginning with $prefix by $newline, in Tcl rather than sed: nothing
+# -- in $newline is interpreted.  the file is written to a temporary copy with the same permissions
+# -- and renamed over the original, so an interrupted write cannot truncate it.
+# -- returns the number of lines replaced (the file is left untouched when that is 0).
+proc file:setline {path prefix newline} {
+    set enc [encoding system]
+    set fh [open $path r]; fconfigure $fh -translation lf -encoding $enc; set data [read $fh]; close $fh
+    set trailing [expr {[string index $data end] eq "\n"}]
+    if {$trailing} { set data [string range $data 0 end-1] }
+    set out [list]; set n 0; set plen [string length $prefix]
+    foreach line [split $data \n] {
+        if {[string equal -length $plen $prefix $line]} { lappend out $newline; incr n } else { lappend out $line }
+    }
+    if {$n == 0} { return 0 }
+    set tmp "$path.tmp[pid]"
+    set fh [open $tmp w]; fconfigure $fh -translation lf -encoding $enc
+    puts -nonewline $fh [join $out \n]
+    if {$trailing} { puts -nonewline $fh \n }
+    close $fh
+    catch { file attributes $tmp -permissions [file attributes $path -permissions] }
+    file rename -force $tmp $path
+    return $n
+}
+
+# -- does $path contain a line beginning with $prefix?
+proc file:hasline {path prefix} {
+    set fh [open $path r]; set data [read $fh]; close $fh
+    set plen [string length $prefix]
+    foreach line [split $data \n] { if {[string equal -length $plen $prefix $line]} { return 1 } }
+    return 0
+}
+
 proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
@@ -4207,37 +4257,34 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
     # -- end default proc template
     
     if {$arg eq ""} { reply $stype $starget "usage: conf ?chan? <setting|mask> \[value|-out|-desc\]"; return; }
-    set chan [lindex $arg 0]
+    set chan [arg:word $arg 0]
     if {[string index $chan 0] ne "#" && $chan ne "*"} { 
         # -- default to global if not given
         set chan "*" 
-        set rest [lrange $arg 0 end]
+        set rest [arg:tail $arg 0]
     } else {
-        set rest [lrange $arg 1 end]
+        set rest [arg:tail $arg 1]
     }
+    set words [regexp -all -inline {\S+} $rest];  # -- never list-parse user text
     set cid [db:get id channels chan $chan]
     if {$cid eq ""} { reply $type $target "\002error:\002 channel $chan is not registered."; return; }
     
-    set var [join $rest :]
-    set length [llength $rest]; set out 0; set desc 0; set change 0
+    set var [join $words :]
+    set length [llength $words]; set out 0; set desc 0; set change 0
     
     if {$length eq "1"} {
-        if {[string match "*:*" $rest]} {
-            # -- var is colon notation
-            set var [join [lrange $arg 1 end]]
-        }
-        set var $rest
+        set var [lindex $words 0]
     } else {
-        if {[lindex $rest [expr $length - 1]] eq "-out"} {
-            set var [join [lrange $rest 0 [expr $length - 2]] :]
+        if {[lindex $words end] eq "-out"} {
+            set var [join [lrange $words 0 end-1] :]
             set out 1;
-        } elseif {[lindex $rest [expr $length - 1]] eq "-desc"} {
-            set var [join [lrange $rest 0 [expr $length - 2]] :]
+        } elseif {[lindex $words end] eq "-desc"} {
+            set var [join [lrange $words 0 end-1] :]
             set desc 1;
         } elseif {$rest ne ""} {
             # -- change setting value
             set change 1
-            set var [lindex $rest 0]
+            set var [lindex $words 0]
 
             # -- check for special values
             if {$var in "info"} {
@@ -4245,35 +4292,34 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
                 return;
             }
 
-            set newval [join [lrange $rest 1 end]]
+            set newval [arg:tail $rest 1];  # -- verbatim
+            if {$newval eq "\"\""} { set newval "" };  # -- "" means: set to empty
             if {![info exists cfg($var)]} {
                 reply $type $target "no such setting found." 
                 return;
             }
             set curval [cfg:get $var $chan]
             if {$newval eq $curval} {
+                if {[conf:sensitive $var] && $type ne "dcc"} { set curval "(hidden)" }
                 reply $type $target "\002info:\002 value for \002$var\002 is already: $curval" 
                 return;
             }
             # -- update the value
-            set os [exec uname]
-            if {[regexp -- {^\d+$} $newval] || $newval eq "\"\""} {
-                # -- number
-                set newset "set cfg($var) $newval"
-            } else {
-                # -- string
-                set newset "set cfg($var) \"$newval\""
-            }
-            if {$os in "FreeBSD OpenBSD NetBSD macOS"} {
-                # -- non-GNU sed
-                exec sed -i '' "s|^set cfg($var) .*$|$newset|" "./armour/[cfg:get botname].conf"
-            } else {
-                # -- GNU sed
-                exec sed -i "s|^set cfg($var) .*$|$newset|" "./armour/[cfg:get botname].conf"
+            # -- SECURITY: this used to build a sed command from the value; a value containing
+            # -- "|" could end the substitution and add sed's "e" command, running a shell command.
+            # -- the line is now replaced in Tcl, and written as a properly quoted Tcl literal so the
+            # -- value cannot run code when the config file is sourced on the next start.
+            set newset "set cfg($var) [conf:literal $newval]"
+            set conffile "./armour/[cfg:get botname].conf"
+            if {[catch {file:setline $conffile "set cfg($var) " $newset} n]} {
+                reply $type $target "\002error:\002 could not update $conffile: $n"
+                return
             }
             set cfg($var) $newval
-            debug 0 "\002cmd:conf:\002 updated config setting \002$var\002 to: \002$newval\002"
-            reply $type $target "done. updated setting \002$var\002 to: \002$newval\002"
+            set shown [expr {[conf:sensitive $var] && $type ne "dcc" ? "(hidden)" : $newval}]
+            set note [expr {$n == 0 ? " (not found in the config file -- applies until restart)" : ""}]
+            debug 0 "\002cmd:conf:\002 updated config setting \002$var\002 to: \002[expr {[conf:sensitive $var] ? "(hidden)" : $newval}]\002$note"
+            reply $type $target "done. updated setting \002$var\002 to: \002$shown\002$note"
             return;
         }
     }
@@ -4287,10 +4333,16 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
         
     # -- check the var
     set count 0;
-    if {[cfg:get $var $chan] ne ""} {
+    # -- exact match if the setting exists (even when its value is empty, e.g. auth:pass=""),
+    # -- otherwise treat $var as a mask.  using [info exists] rather than [cfg:get] here avoids
+    # -- cfg:get raising a "config error" for a mask like *auth* and correctly routes empty-valued
+    # -- settings to the exact branch.
+    if {[info exists cfg($var)]} {
         if {!$desc} {
             # -- don't show config var description 
-            reply $type $target "\002setting:\002 cfg($var) -- \002value:\002 [cfg:get $var $chan]"
+            # -- secrets are only shown over DCC; the protected list used to apply to masks only
+            set shown [expr {[conf:sensitive $var] && $type ne "dcc" ? "(hidden)" : [cfg:get $var $chan]}]
+            reply $type $target "\002setting:\002 cfg($var) -- \002value:\002 $shown"
         } else {
             # -- show description of config setting
             set lines [arm:conftest $var]
@@ -4309,19 +4361,8 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
         set thelist ""
         foreach i [array names cfg] {
             set long [split $i :]
-            # -- protect some sensitive vars
-            switch -- $i {
-                auth:pass   { continue; }
-                auth:totp   { continue; }
-                ipqs:key    { continue; }
-                ircbl:key   { continue; }
-                ask:token   { continue; }
-                ask:org     { continue; }
-                speak:key   { continue; }
-                humour:key  { continue; }
-                ninjas:key  { continue; }
-                weather:key { continue; }
-            }
+            # -- protect sensitive vars (dronebl:key was missing from the old hand-written list)
+            if {[conf:sensitive $i]} { continue; }
             if {[string match $var $i] || [string match $var $long]} { lappend thelist $i }
         }
         if {$thelist ne ""} {
@@ -4348,7 +4389,7 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
     } elseif {$count > 1} {
         reply $type $target "done. $count results found."
     }
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: cmds
@@ -8203,11 +8244,15 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
     
     lassign [db:get id,user users curnick $nick] uid user
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"
 
-    set botname [lindex $arg 0]
-    set defchan [lindex $arg 1]
-    set settings [lrange $arg 2 end]
+    set botname [arg:word $arg 0]
+    set defchan [arg:word $arg 1]
+    # -- settings are list-parsed on purpose: {realname=I am a string} groups a multi-word value
+    if {[catch {lrange $arg 2 end} settings]} {
+        reply $stype $starget "\002error:\002 malformed settings (unbalanced braces or quotes)"
+        return
+    }
     if {$botname eq "" || $defchan eq ""} {
         # -- botname must be given
         reply $stype $starget "\002usage:\002 deploy <bot> <chan> \[setting1=value1 setting2=value2 settingN=valueN...\]"
@@ -8221,7 +8266,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         reply $stype $starget "\002error:\002 default channel already specified with \002<chan>\002 parameter."
         return;
     }
-    append settings " chan:def=$defchan"
+    lappend settings "chan:def=$defchan"
 
     # -- check for install script
     if {![file exists "./armour/install.sh"]} {
@@ -8229,6 +8274,12 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         return; 
     }
 
+    # -- SECURITY: the bot name becomes file names and exec arguments (cp, rm, autobotchk, sed);
+    # -- "../" walked out of deploy/, and a leading ">" turned an argument into a redirection
+    if {![regexp -- {^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$} $botname]} {
+        reply $stype $starget "\002error:\002 bot name may only contain letters, digits, _ and - (max 32)"
+        return
+    }
     if {$botname eq ${botnet-nick}} {
         # -- bot is self
         reply $stype $starget "\002error:\002 uhh, I already exist."
@@ -8236,7 +8287,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # -- check for custom network
-    set netset [lsearch "network=*" $settings]
+    set netset [lsearch -glob $settings "network=*"];  # -- arguments were reversed: this override was always ignored
     if {$netset ne -1} {
         set value [lindex $settings $netset]
         regexp {^network=(.+)$} $value -> netval
@@ -8245,6 +8296,10 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         set netval $network
     }
     set netval [string tolower $netval]
+    if {![regexp -- {^[a-z0-9][a-z0-9_.-]*$} $netval]} {
+        reply $stype $starget "\002error:\002 invalid network name: $netval"
+        return
+    }
 
     if {[file exists "./$botname.conf"] || [file exists "./armour/$botname.conf"]} {
         # -- botname already exists
@@ -8265,32 +8320,37 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # -- copy the deployment template file
-    exec cp ./armour/deploy/$netval.ini ./armour/deploy/$botname.ini
+    file copy ./armour/deploy/$netval.ini ./armour/deploy/$botname.ini
     debug 1 "\002cmd:deploy:\002 copied ./armour/deploy/$netval.ini to ./armour/deploy/$botname.ini"
 
-    set os [exec uname]
     set count 0
     set done [list]
     # -- process the provided settings
     # -- note: multi word values must be wrapped in curly braces, e.g., {realname=I am a string}
-    set settings [join $settings]
+    # -- (these two joins flattened {realname=I am a string} into separate words, breaking it)
     foreach setting $settings {
-        set setting [join $setting]        
         set invalid 0
         # -- check format of setting=value in command
         if {![regexp {^([^=]+)=(.+)$} $setting -> fset fval]} { set invalid 1 }
 
-        set fset [string tolower $fset]
-        set fval [string trimleft $fval \"]
-        set fval [string trimright $fval \"]
-
-        # -- check if setting exists in deploy file
-        debug 3 "\002cmd:deploy:\002 checking deploy/$botname.ini for setting: $fset"
-        set err [catch {exec egrep "^$fset\=" ./armour/deploy/$botname.ini} result]
-        if {$err ne 0} { set invalid 1 }
+        if {!$invalid} {
+            set fset [string tolower $fset]
+            set fval [string trimleft $fval \"]
+            set fval [string trimright $fval \"]
+            # -- SECURITY: values end up in sed commands (here and in install.sh) and in Tcl config
+            # -- files sourced at startup; refuse the characters that are special in any of those
+            if {![regexp -- {^[a-z0-9][a-z0-9_.:-]*$} $fset]} { set invalid 1 }
+            if {[regexp -- {[|&\\"$\[\]`\x00-\x1f\x7f]} $fval]} { set invalid 1 }
+        }
+        if {!$invalid} {
+            # -- check if setting exists in deploy file
+            debug 3 "\002cmd:deploy:\002 checking deploy/$botname.ini for setting: $fset"
+            if {![file:hasline ./armour/deploy/$botname.ini "$fset="]} { set invalid 1 }
+        }
+        if {![info exists fset]} { set fset $setting }
 
         if {$invalid} {
-            exec rm ./armour/deploy/$botname.ini
+            file delete ./armour/deploy/$botname.ini
             debug 1 "\002cmd:deploy:\002 invalid deployment setting: $fset -- deleted ./armour/deploy/$botname.ini"
             reply $type $target "\002error:\002 invalid deployment setting: $fset"
             return;
@@ -8305,11 +8365,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         }
 
         set updated_line "$fset=\"$fval\""
-        if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-            exec sed -i '' "s|^$fset=.*$|$updated_line|" ./armour/deploy/$botname.ini
-        } else {
-            exec sed -i "s|^$fset=.*$|$updated_line|" ./armour/deploy/$botname.ini
-        }
+        file:setline ./armour/deploy/$botname.ini "$fset=" $updated_line
         debug 1 "\002cmd:deploy:\002 updated line in ./armour/deploy/$botname.ini: $updated_line"
         incr count
     }
@@ -8332,11 +8388,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
                 set val [set [subst $setting]]
             }
             set updated_line "$setting=\"$val\""
-            if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-                exec sed -i '' "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            } else {
-                exec sed -i "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            }
+            file:setline ./armour/deploy/$botname.ini "$setting=" $updated_line
             debug 1 "\002cmd:deploy:\002 updated line in ./armour/deploy/$botname.ini: $updated_line"
             incr count
         }
@@ -8353,11 +8405,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
             # -- default to existing var
             set val [cfg:get $setting]
             set updated_line "$setting=\"$val\""
-            if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-                exec sed -i '' "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            } else {
-                exec sed -i "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            }
+            file:setline ./armour/deploy/$botname.ini "$setting=" $updated_line
             debug 1 "\002cmd:deploy:\002 updated line in ./armour/deploy/$botname.ini: $updated_line"
             incr count
         }
@@ -8402,11 +8450,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
                 debug 0 "\002cmd:deploy:\002 added cronjob for $botname"
                 # -- fix 'userfile="db/$uservar.user"' line in botchk
                 set newline "userfile=\"db/$botname.user\""
-                if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-                    exec sed -i '' "s|^userfile=.*$|$newline|" ./$botname.botchk
-                } else {
-                    exec sed -i "s|^userfile=.*$|$newline|" ./$botname.botchk
-                }
+                file:setline ./$botname.botchk "userfile=" $newline
             } else {
                 debug 0 "\002cmd:deploy:\002 error adding cronjob for $botname: $res"
             }
