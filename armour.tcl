@@ -1879,7 +1879,7 @@ proc db:add {list chan method value modifby action limit reason} {
     variable entries;  # -- dict: blacklist and whitelist entries
     variable flud:id;  # -- the id of a given cumulative pattern (by chan,method,value)
     
-    set reason [join $reason]
+    set reason [regsub -all {\s+} [string trim $reason] " "]; # -- collapse whitespace; do NOT list-parse (verbatim text)
     set ts [clock seconds]
     
     # -- always do SQL insert first and use that last row ID (keeping memory in sync with db)
@@ -1923,7 +1923,7 @@ proc db:add {list chan method value modifby action limit reason} {
     dict set entries $id limit $limit
     dict set entries $id hits 0
     dict set entries $id depends ""
-    dict set entries $id reason [join [split $reason]]
+    dict set entries $id reason $reason; # -- already normalised above; verbatim, not list-parsed
     
     # -- track the ids of cumulative patterns
     if {$limit ne "1:1:1" && $limit ne ""} { set flud:id($chan,$method,$value) $id };
@@ -4867,12 +4867,12 @@ proc arm:cmd:kick {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
 
     # -- check for channel
-    set first [lindex $arg 0]
+    set first [arg:word $arg 0]
     if {[string index $first 0] eq "#"} {
-        set chan $first; set kicklist [lindex $arg 1]; set reason [lrange $arg 2 end];
+        set chan $first; set kicklist [arg:word $arg 1]; set reason [arg:tail $arg 2];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set kicklist [lindex $arg 0]; set reason [lrange $arg 1 end]
+        set kicklist [arg:word $arg 0]; set reason [arg:tail $arg 1]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     set log "$chan [join $arg]"; set log [string trimright $log " "]
@@ -4926,17 +4926,17 @@ proc arm:cmd:ban {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
     
     # -- check for channel
-    set first [lindex $arg 0]
+    set first [arg:word $arg 0]
     if {[string index $first 0] == "#"} { 
-        set chan $first; set banlist [lindex $arg 1]; set rest [lrange $arg 2 end];
+        set chan $first; set banlist [arg:word $arg 1]; set rest [arg:tail $arg 2];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set banlist [lindex $arg 0]; set rest [lrange $arg 1 end]
+        set banlist [arg:word $arg 0]; set rest [arg:tail $arg 1]
     }
 
-    if {[string is digit [lindex $rest 0]] || [regexp -- {^(\d+)([hmsd])$} [lindex $rest 0] time unit]} {
-        set duration [lindex $rest 0]
-        set reason [lrange $rest 1 end]
+    if {[string is digit [arg:word $rest 0]] || [regexp -- {^(\d+)([hmsd])$} [arg:word $rest 0] time unit]} {
+        set duration [arg:word $rest 0]
+        set reason [arg:tail $rest 1]
     } else {
          set duration [cfg:get ban:time $chan]; set reason $rest
     }
@@ -5118,12 +5118,12 @@ proc arm:cmd:topic {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
     
     # -- check for channel
-    set first [lindex $arg 0]
+    set first [arg:word $arg 0]
     if {[string index $first 0] eq "#"} {
-        set chan $first; set topic [lrange $arg 1 end];
+        set chan $first; set topic [arg:tail $arg 1];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set topic [lrange $arg 0 end]
+        set topic [arg:tail $arg 0]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     set log "$chan [join $arg]"; set log [string trimright $log " "]
@@ -5169,11 +5169,11 @@ proc arm:cmd:black {0 1 2 3 {4 ""} {5 ""}} {
     
     # -- check for channel
     if {[string index [lindex $arg 0] 0] eq "#" || [lindex $arg 0] eq "*"} {
-        set chan [lindex $arg 0]; set tnick [lindex $arg 1];
-        set reason [lrange $arg 2 end];
+        set chan [arg:word $arg 0]; set tnick [arg:word $arg 1];
+        set reason [arg:tail $arg 2];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set tnick [lindex $arg 0]; set reason [lrange $arg 1 end]
+        set tnick [arg:word $arg 0]; set reason [arg:tail $arg 1]
     }
     set ltnick [string tolower $tnick]
     set stnick [split $tnick]
@@ -6152,13 +6152,13 @@ proc arm:cmd:say {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
     set chan [userdb:get:chan $user $chan]
 
-    set dest [lindex $arg 0]
-    set string [join [lrange $arg 1 end]]
+    set dest [arg:word $arg 0]
+    set string [arg:tail $arg 1]
     
     set action 0; set idx 0
     if {$dest eq "-a"} {
         # -- action (/me)
-        set action 1; set dest [lindex $arg 1]; set idx 1
+        set action 1; set dest [arg:word $arg 1]; set idx 1
         if {$dest eq ""} { reply $stype $starget "\002usage:\002 say -a <chan|*> <string>"; return;  }
     }
 
@@ -6184,8 +6184,7 @@ proc arm:cmd:say {0 1 2 3 {4 ""} {5 ""}} {
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     set msglist [join $msglist ,]
-    if {$action} { set string "\001ACTION [lrange $arg $idx end]\002" } else { set string [lrange $arg $idx end] }
-    set string [join $string]
+    if {$action} { set string "\001ACTION [arg:tail $arg $idx]\002" } else { set string [arg:tail $arg $idx] }
     if {$msglist eq "" || $string eq ""} { reply $stype $starget "\002usage:\002 say \[-a\] <chan|*> <string>"; return;  }
     
     set log "$chan [join $arg]"; set log [string trimright $log " "]
@@ -6718,7 +6717,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
             }
         }
 
-        set comment [lrange $arg 3 end]
+        set comment [arg:tail $arg 3]
 
         if {$method eq "last"} {
             if {![info exists data:lasthosts($chan)]} { reply $type $target "error: no hosts in memory."; return; }
@@ -6779,13 +6778,13 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         set origlimit "$joins:$secs:$hold"
         if {$secs eq $hold} { set newlimit "$joins:$secs" } else { set newlimit $origlimit }
         set limit "$joins:$secs:$hold"
-        set reason [lrange $arg $tn end]
+        set reason [arg:tail $arg $tn]
     } else {
         set limit "1:1:1"
         if {$ischan} {
-            set reason [lrange $arg [expr $tn + 1] end]
+            set reason [arg:tail $arg [expr {$tn + 1}]]
         } else {
-            set reason [lrange $arg $tn end]
+            set reason [arg:tail $arg $tn]
         }
     }
 
@@ -6914,7 +6913,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
         set timestamp [unixtime]; set modifby $source
 
-        debug 1 "arm:cmd:add: adding entry: chan: $chan -- type: $prefix -- method: $method -- value: $value -- modifby: $modifby -- action: $action -- reason: [join $reason]"
+        debug 1 "arm:cmd:add: adding entry: chan: $chan -- type: $prefix -- method: $method -- value: $value -- modifby: $modifby -- action: $action -- reason: $reason"
 
         set id [db:add $prefix $chan $method $value $modifby $action $limit $reason]
 
@@ -6922,12 +6921,12 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
         if {$method eq "text"} {
             if {$list eq "black"} {
-                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reply:\002 [join $reason])"
+                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reply:\002 $reason)"
             } else {
-                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002reply:\002 [join $reason])"
+                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002reply:\002 $reason)"
             }
         } else {
-            reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reason:\002 [join $reason])"
+            reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reason:\002 $reason)"
         }
 
         set tchans [list]
@@ -6955,11 +6954,11 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
                         foreach i [get:val data:hostnicks $tvalue,$lchan] {
                             incr hit
                             lassign [split [getchanhost $i] @] ident host
-                            kickban $i $ident $host $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
+                            kickban $i $ident $host $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: $reason) \[id: $id\]" $id
                         }
                     }
                     if {!$hit} {
-                        kickban 0 $mask 0 $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
+                        kickban 0 $mask 0 $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: $reason) \[id: $id\]" $id
                     }
                 }
             }
@@ -9060,6 +9059,22 @@ proc raw:oper {server cmd text} {
 # -- proc for generic response (raw 352)
 # -- add handling per ircd type
 # -- this isn't returned on ircu (Undernet) for our special /WHOs that specify a 'querytype'
+# -- parse a 352 WHO reply (IRCnet-style, with server ID) as text, never as a Tcl list
+# --   mynick chan ident host server nick flags :hopcount SID realname...
+# -- the realname is user-controlled: an unbalanced brace or quote in it made lassign/lrange throw
+# -- returns: mynick chan ident host server nick flags hopcount sid rname  (rname: list of words)
+# --          or "" if the line is malformed
+proc raw:parse:352 {arg} {
+    set idx [string first " :" $arg]
+    if {$idx == -1} { return "" }
+    set params [regexp -all -inline {\S+} [string range $arg 0 [expr {$idx - 1}]]]
+    if {[llength $params] < 7} { return "" }
+    lassign $params mynick chan ident host server nick flags
+    regexp -- {^(\S*)\s*(\S*)\s?(.*)$} [string range $arg [expr {$idx + 2}] end] -> hopcount sid rtext
+    set rname [regexp -all -inline {\S+} $rtext]
+    return [list $mynick $chan $ident $host $server $nick $flags $hopcount $sid $rname]
+}
+
 proc raw:genwho {server cmd arg} {
     variable cfg
     # -- ircd types:
@@ -9071,16 +9086,9 @@ proc raw:genwho {server cmd arg} {
         # -- IRCnet/EFnet
         #server    cmd    mynick type ident host server nick away :hopcount sid rname
         #irc.psychz.net    352    cori * _mxl    ipv4.pl    ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        # -- parse as text, never as a Tcl list: the realname is user-controlled, and an
-        # -- unbalanced brace or quote in it made lassign/lrange throw, so the client was never scanned
-        set idx [string first " :" $arg]
-        if {$idx == -1} { debug 1 "\002raw:genwho:\002 malformed 352 (no trailing parameter): $arg"; return; }
-        set params [regexp -all -inline {\S+} [string range $arg 0 [expr {$idx - 1}]]]
-        if {[llength $params] < 7} { debug 1 "\002raw:genwho:\002 malformed 352 (too few parameters): $arg"; return; }
-        lassign $params mynick chan ident host server nick flags
-        # -- trailing parameter is: hopcount SID realname...  (the realname starts after the SID)
-        regexp -- {^(\S*)\s*(\S*)\s?(.*)$} [string range $arg [expr {$idx + 2}] end] -> hopcount sid rtext
-        set rname [regexp -all -inline {\S+} $rtext]
+        set parsed [raw:parse:352 $arg]
+        if {$parsed eq ""} { debug 1 "\002raw:genwho:\002 malformed 352: $arg"; return; }
+        lassign $parsed mynick chan ident host server nick flags hopcount sid rname
         # -- NOTE: the above raw example doesn't appear to provide an actual IP; do a DNS lookup (doh! this slows us down)
         if {![isValidIP $host]} {
             # -- only do this if it's not already an IPv4 IP
@@ -9805,7 +9813,7 @@ proc mode:rem:b {nick uhost hand chan mode target} {
             set action [dict get $entries $id action]
             set limit [dict get $entries $id limit]
             set hits [dict get $entries $id hits]
-            set reason [join [dict get $entries $id reason]]
+            set reason [dict get $entries $id reason]; # -- stored verbatim/normalised, do not list-parse
             set ext [lassign [split $limit :] joins secs hold]
             if {$secs eq $hold} { set limit "$joins:$secs" }
             if {$type eq "white"} { set list "whitelist" } \
@@ -9916,12 +9924,18 @@ proc raw:topic {server cmd arg} {
     variable dbchans
     
     # :foo.undernet.org 332 Empus #armour :Armour -- https://armour.bot -- Upcoming v4.1 Release (work-in-progress): https://armour.bot/changelog/#preview
-    set chan [lindex $arg 1]
+    set chan [lindex [split $arg] 1]
     set lchan [string tolower $chan]
     if {![info exists atopic:topic($lchan)]} { return; }; # -- not expecting TOPIC response for this channel
 
-    set topic [lrange $arg 2 end]
-    set topic [string trimleft $topic :]
+    # -- take the topic exactly as sent: list-parsing it altered topics containing [ $ \ or runs of
+    # -- spaces, so atopic:set never saw a match and re-set the topic on every check
+    set idx [string first " :" $arg]
+    if {$idx != -1} {
+        set topic [string range $arg [expr {$idx + 2}] end]
+    } else {
+        set topic [join [lrange [split $arg] 2 end]];  # -- no ':' prefix (single-word topic)
+    }
 
     atopic:set $chan $topic; # -- send to code common to raw 331 & 332
 }
@@ -9929,7 +9943,7 @@ proc raw:topic {server cmd arg} {
 # -- AUTOTOPIC raw: no such topic
 proc raw:notopic {server cmd arg} {
     variable atopic:topic
-    set chan [lindex $arg 1]
+    set chan [lindex [split $arg] 1]
     set lchan [string tolower $chan]
     if {![info exists atopic:topic($lchan)]} { return; }; # -- not expecting TOPIC response for this channel
     atopic:set $chan ""; # -- send to code common to raw 331 & 332
@@ -12223,7 +12237,7 @@ proc userdb:msg:pass {nick uhost hand arg} {
         return;
     }
 
-    set firstpass [lrange $arg 1 end]
+    set firstpass [arg:tail $arg 1];  # -- verbatim: never list-parsed
     #*msg:pass $nick $uhost $hand "pass $arg"; # -- set initial eggdrop password
 
     set owner [lindex [userlist] 0]
@@ -13502,8 +13516,9 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     }
     # -- update the setting!
     db:connect
-    if {$cvalue eq ""} { db:query "INSERT INTO settings (cid,setting,value) VALUES($cid,'$ttype','[db:escape $value]')" } \
-    else { db:query "UPDATE settings SET value='$value' WHERE cid=$cid AND setting='$ttype'" }
+    set db_value [db:escape $value]
+    if {$cvalue eq ""} { db:query "INSERT INTO settings (cid,setting,value) VALUES($cid,'$ttype','$db_value')" } \
+    else { db:query "UPDATE settings SET value='$db_value' WHERE cid=$cid AND setting='$ttype'" }
     db:close
     
     dict set dbchans $cid $ttype $value; # -- update the setting in dict
@@ -14047,14 +14062,37 @@ proc userdb:pub:login {nick uhost hand chan arg} {
 
 # -- command: login
 # login <user> <passphrase>
+# -- does the password typed in $arg (after the first $n words) match a stored hash?
+# -- returns "exact", "legacy", or "" for no match.
+# -- older versions list-parsed the password before hashing it, in one of two ways: login and
+# -- set hashed [join [lrange ...]], while newpass, logout and the first-run pass command hashed
+# -- [lrange ...].  for any password containing $ ; [ ] \ " { } or a leading #, the two differ,
+# -- so newpass stored a hash that login could never reproduce.  "legacy" means the stored hash
+# -- matched one of those old forms.  the hash is deliberately NOT re-saved in the exact form: a
+# -- stored hash cannot be told apart from an exact hash of a list-parsed string (e.g. hunter2 vs
+# -- a login typed as {hunter2}), so rewriting it could silently change -- and lock out -- a password.
+proc userdb:pass:match {arg n storepass} {
+    if {$storepass eq ""} { return "" }
+    set pass [arg:tail $arg $n]
+    if {$pass eq ""} { return "" }
+    if {[userdb:encrypt $pass] eq $storepass} { return "exact" }
+    foreach form {join list} {
+        # -- a legacy form that cannot be parsed (unbalanced brace or quote) cannot match
+        if {[catch {set legacy [lrange $arg $n end]}]} { continue }
+        if {$form eq "join"} { set legacy [join $legacy] }
+        if {$legacy ne "" && $legacy ne $pass && [userdb:encrypt $legacy] eq $storepass} { return "legacy" }
+    }
+    return ""
+}
+
 proc userdb:msg:login {nick uhost hand arg} {
     if {[userdb:isLogin $nick]} {
         # -- already logged in
         reply pub $nick "$nick: mate, you are already authenticated."
         return;
     }
-    set user [join [lindex $arg 0]]
-    set pass [join [lrange $arg 1 end]]
+    set user [arg:word $arg 0]
+    set pass [arg:tail $arg 1];  # -- verbatim: never list-parsed
     if {$user eq "" && $pass eq ""} { 
         # -- TODO: make it configurable to allow self login
         putquick "WHOIS $nick"
@@ -14079,9 +14117,6 @@ proc userdb:msg:login {nick uhost hand arg} {
     
     set cmd "login"
     
-    # -- encrypt given pass
-    set encrypt [userdb:encrypt $pass]
-    
     # -- check against user
     set storepass [userdb:user:get pass user $user]
     
@@ -14094,10 +14129,12 @@ proc userdb:msg:login {nick uhost hand arg} {
         return;
     }
         
-    # -- match encrypted passwords
-    if {$encrypt eq $storepass} {
+    # -- match encrypted passwords (accepting hashes made by older versions)
+    set match [userdb:pass:match $arg 1 $storepass]
+    if {$match ne ""} {
         # -- match successful, login
         debug 0 "userdb:msg:login: password match for $user, login successful"
+        if {$match eq "legacy"} { debug 1 "userdb:msg:login: $user matched a legacy (list-parsed) password hash" }
         userdb:login $nick $uhost $user 1;  # -- send to common login code
                 
         # -- create log entry for command use
@@ -14372,10 +14409,10 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curtz eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$tuid','$tz')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$tuid','[db:escape $tz]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$tz' WHERE setting='tz' AND uid=$tuid"
+            db:query "UPDATE settings SET value='[db:escape $tz]' WHERE setting='tz' AND uid=$tuid"
         }
         db:close
         debug 0 "userdb:cmd:moduser: user $user ($source) modified $tuser's timezone to $tz"
@@ -14395,10 +14432,10 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curcity eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$tuid','$city')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$tuid','[db:escape $city]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$city' WHERE setting='city' AND uid=$tuid"
+            db:query "UPDATE settings SET value='[db:escape $city]' WHERE setting='city' AND uid=$tuid"
         }
         db:close
     }
@@ -14429,10 +14466,10 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
     # -- command: moduser
         
     # -- check for optional chan, but it only applies to setting a greet
-    set first [string index [lindex $arg 0] 0]
+    set first [string index [arg:word $arg 0] 0]
     if {$first eq "#" || $first eq "*"} {
-        lassign $arg chan ttype
-        set tvalue [join [lrange $arg 2 end]]
+        set chan [arg:word $arg 0]; set ttype [arg:word $arg 1]
+        set tvalue [arg:tail $arg 2];  # -- verbatim: never list-parsed
         if {($ttype ne "greet" || [string index $ttype 0] ne "g") \
             && ($ttype ne "automode" && [string match $tvalue "au*"] ne $tvalue)} {
                 reply $type $target "\002error:\002 channel only applies to greet and automode. see: \002help set\002"
@@ -14440,8 +14477,8 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
         } 
     } else {
         # -- no chan given
-        set ttype [lindex $arg 0]
-        set tvalue [join [lrange $arg 1 end]]
+        set ttype [arg:word $arg 0]
+        set tvalue [arg:tail $arg 1];  # -- verbatim: never list-parsed
         set chan [userdb:get:chan $user $chan]; # -- automatically determine the channel if not provided
     }
         
@@ -14482,7 +14519,7 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
     
     if {$ttype eq "automode"} {
         # -- modifying automode
-        set tvalue [lindex $tvalue 0]
+        set tvalue [arg:word $tvalue 0]
         if {$level < 100 && $tvalue eq "op"} {
             reply $stype $starget "\002(\002error\002)\002 automode cannot be set to \002op\002 yourself for level $tlevel.";
         }
@@ -14551,10 +14588,10 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curtz eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$uid','$tz')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$uid','[db:escape $tz]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$tz' WHERE setting='tz' AND uid=$uid"
+            db:query "UPDATE settings SET value='[db:escape $tz]' WHERE setting='tz' AND uid=$uid"
         }
         db:close
         debug 0 "userdb:cmd:set: user $user ($source) set timezone to $tz"
@@ -14574,17 +14611,17 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curcity eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$uid','$city')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$uid','[db:escape $city]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$city' WHERE setting='city' AND uid=$uid"
+            db:query "UPDATE settings SET value='[db:escape $city]' WHERE setting='city' AND uid=$uid"
         }
         db:close
     }
         
     if {$ttype eq "email"} {    
         # -- modifying e-mail address
-        set tvalue [lindex $tvalue 0]
+        set tvalue [arg:word $tvalue 0]
         # -- validate e-mail address
         if {![regexp -nocase {^[A-Za-z0-9\._%+-]+@[A-Za-z0-9\._%+-]+$} $tvalue]} { reply $type $target "\002(\002error\002)\002 invalid e-mail address."; return; }
         # -- make the change
@@ -14636,8 +14673,8 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
 # logout <user> <passphrase>
 proc userdb:msg:logout {nick uhost hand arg} {
     set cmd "logout"
-    set tuser [lindex $arg 0]
-    set pass [lrange $arg 1 end]
+    set tuser [arg:word $arg 0]
+    set pass [arg:tail $arg 1];  # -- verbatim: never list-parsed
 
     lassign [db:get id,curnick,user users curnick $nick] uid curnick user
 
@@ -14686,7 +14723,7 @@ proc userdb:msg:logout {nick uhost hand arg} {
     }
 
     # -- check against user
-    lassign [db:get id,user,curnick,pass users user $tuser] tuid tuser tcurnick storepass
+    lassign [db:get id,user,curnick,curhost,pass users user $tuser] tuid tuser tcurnick tcurhost storepass
     
     if {$self eq 0} {
         # -- logout for another user
@@ -14694,15 +14731,13 @@ proc userdb:msg:logout {nick uhost hand arg} {
             reply notc $nick "user $tuser is not authed."; 
             return;
         }
-        # -- encrypt given pass
-        set encrypt [userdb:encrypt $pass]
-    
-        # -- match encrypted passwords
-        if {$encrypt eq $storepass} {
-            # -- match successful, login
+        # -- match encrypted passwords (accepting hashes made by older versions)
+        if {[userdb:pass:match $arg 1 $storepass] ne ""} {
+            # -- match successful: log out the target user.  (this used to read an unset $tnick,
+            # -- which threw, and would otherwise have logged out the requester instead)
             debug 0 "userdb:msg:logout: password match for $tuser, logout successful"
-            set tnick $tnick
-            userdb:logout $nick $uhost; # -- send to common logout code
+            set tnick $tcurnick
+            set uhost $tcurhost
         } else {
             # -- no password match
             debug 0 "userdb:msg:logout password mismatch for user: $tuser, logout failed ($nick!$uhost)"
@@ -14732,7 +14767,7 @@ proc userdb:msg:logout {nick uhost hand arg} {
 # newpass <passphrase>
 proc userdb:msg:newpass {nick uhost hand arg} {
     set cmd "newpass"
-    set newpass [lrange $arg 0 end]
+    set newpass [arg:tail $arg 0];  # -- verbatim: never list-parsed
     if {$newpass eq ""} { reply notc $nick "\002usage:\002 newpass <passphrase>"; return; }
     
     # -- check if user is logged in
@@ -14896,10 +14931,18 @@ proc userdb:isValiduser {user} {
 }
 
 # -- encrypt password (basic md5)
+package require md5
 proc userdb:encrypt {pass} {
-    # -- md5sum hashes are diferent to md5 package
-    if {[exec uname] eq "Linux"} { return [lindex [exec echo $pass | md5sum] 0] }
-    return [::md5 $pass]; # -- BSD and macOS can use tcllib md5 as it's the same as md5 binary
+    # -- SECURITY: this used to run [exec echo $pass | md5sum].  exec treats an argument beginning
+    # -- with > or 2> as an output redirection, so a password such as ">armour/db/armour.db", sent
+    # -- to the unauthenticated login command, truncated any file the bot could write.
+    # -- it is now computed in-process.  the old digest was md5 of the password plus the newline
+    # -- echo appends, encoded the way exec encodes arguments (the system encoding), so the same
+    # -- bytes are hashed here and every existing stored hash stays valid.
+    if {$::tcl_platform(os) eq "Linux"} {
+        return [string tolower [::md5::md5 -hex [encoding convertto [encoding system] "$pass\n"]]]
+    }
+    return [::md5 $pass]; # -- BSD and macOS (unchanged)
 }
 
 
@@ -15433,8 +15476,11 @@ proc userdb:raw:genwho {server cmd arg} {
     } elseif {$ircd eq "2"} {      
         # -- IRCnet
         #irc.psychz.net 352 cori * _mxl ipv4.pl ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick ident host server nick away hopcount sid
-        set rname [lrange $arg 9 end]
+        # -- parse via the shared parser: the old lassign omitted the channel field, shifting every
+        # -- field by one (ident got the channel, nick got the server), and list-parsed the realname
+        set parsed [raw:parse:352 $arg]
+        if {$parsed eq ""} { debug 1 "\002userdb:raw:genwho:\002 malformed 352: $arg"; return; }
+        lassign $parsed mynick chan ident host server nick away hopcount sid rname
         # -- NOTE:  The above raw example doesn't appear to provide an actual IP;
         # --        A DNS lookup would slow us down; be doubled up from real scans; and isn't needed for autologin
         set ip 0;
@@ -18242,7 +18288,7 @@ proc log:cmdlog {source chan chan_id user user_id cmd params bywho target target
 proc randpass {{length ""} {chars ")(*&^%$\#@!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz)(*&^%$\#@!"}} {
     variable cfg
     if {$length eq ""} { set length [cfg:get randpass *] }
-    set range [expr {[string length $chars]-1}]
+    set range [string length $chars];  # -- was length-1, so the last character was never chosen
     set text ""
     for {set i 0} {$i < $length} {incr i} {
        set pos [expr {int(rand()*$range)}]
@@ -18289,6 +18335,25 @@ proc proc:setvars {0 1 2 3 {4 ""} {5 ""}} {
     #debug 3 "\002proc:setvars\002: $0 $1 $2 $3 $4 $5"
     #debug 3 "\002proc:setvars\002: arg: $arg"
     return "$type $stype $target $starget $nick $uh $hand $source $chan [list $arg]"
+}
+
+# -- user text reaches command handlers as a raw string (see proc:setvars above).  parsing it as a
+# -- Tcl list throws on an unbalanced brace or quote, and silently rewrites backslashes, braces and
+# -- quotes.  these helpers split on whitespace instead and never interpret the text.
+
+# -- the nth whitespace-separated word (0-based), verbatim; "" if there is none
+proc arg:word {text n} {
+    return [lindex [regexp -all -inline {\S+} $text] $n]
+}
+
+# -- everything after the first n words, verbatim: inner spacing is kept, outer whitespace trimmed
+proc arg:tail {text n} {
+    set text [string trimleft $text]
+    for {set i 0} {$i < $n} {incr i} {
+        if {![regexp -indices -- {^\S+\s*} $text m]} { return "" }
+        set text [string range $text [expr {[lindex $m 1] + 1}] end]
+    }
+    return [string trim $text]
 }
 
 # -- coroutine debug
