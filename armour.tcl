@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092301"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092302"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -7065,10 +7065,11 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
                         lappend uparts "$ubchan: [join [lrange $blocking 0 3] {, }]"
                     }
                     if {$utotal > 0} {
-                        reply $type $target "\002note:\002 lifted $utotal ban[expr {$utotal==1?"":"s"}] on [join [lrange $uparts 0 3] {; }][expr {[llength $uparts] > 4 ? " ..." : ""}]"
+                        reply $type $target "\002note:\002 lifted $utotal ban[expr {$utotal==1?"":"s"}] on [join [lrange $uparts 0 3] {; }][expr {[llength $uparts] > 4 ? " ..." : ""}] (${list}list entry \002$id\002 already exists, unchanged)"
                     } else {
-                        reply $type $target "\002note:\002 no active bans block this entry."
+                        reply $type $target "\002note:\002 no active bans block this entry (${list}list entry \002$id\002 already exists, unchanged)"
                     }
+                    return;  # -- repeating the add to unban is not an error
                 }
                 reply $type $target "\002error:\002 a matching ${list}list entry with identical behaviour already exists. (\002id:\002 $id -- \002type:\002 $method -- \002value:\002 $value)";
                 return;        
@@ -7146,7 +7147,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
                     if {$dounban} {
                         reply $type $target "\002note:\002 lifted $btotal ban[expr {$btotal==1?"":"s"}] on $bshown"
                     } else {
-                        reply $type $target "\002note:\002 $btotal active ban[expr {$btotal==1?"":"s"}] still block this on $bshown -- repeat the add with \002-unban\002 to lift"
+                        reply $type $target "\002note:\002 $btotal active ban[expr {$btotal==1?"":"s"}] still [expr {$btotal==1?"blocks":"block"}] this on $bshown -- repeat the add with \002-unban\002 to lift"
                     }
                 }
             }
