@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092300"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092301"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -6741,19 +6741,20 @@ proc add:blockingbans {chan value} {
     foreach b $bans {
         set mask [lindex $b 0]
         if {$mask eq ""} { continue }
-        # -- the host part of the ban mask
-        set bhost [string range $mask [expr {[string first "@" $mask] + 1}] end]
-        set forms [list $value "*!*@$value" "*@$value"]
-        set hit 0
-        foreach f $forms {
-            if {[string match -nocase $mask $f] || [string match -nocase $f $mask]} { set hit 1; break }
-            if {[string match -nocase $value $bhost] || [string match -nocase $bhost $value]} { set hit 1; break }
+        # -- the host part of the ban mask (everything after the last @)
+        set at [string last "@" $mask]
+        set bhost [expr {$at == -1 ? $mask : [string range $mask [expr {$at + 1}] end]}]
+        # -- a bare "*" host covers every host, so such a ban is not specific to this entry: it is
+        # -- targeting a nick or ident instead (e.g. *nick*!*@* or *!*~ident@*).  reporting those
+        # -- for every whitelist entry is noise, so skip them.
+        if {$bhost eq "" || $bhost eq "*"} { continue }
+        # -- otherwise the ban blocks this entry if either host pattern covers the other
+        if {[string match -nocase $bhost $value] || [string match -nocase $value $bhost]} {
+            lappend out $mask
         }
-        if {$hit} { lappend out $mask }
     }
     return $out
 }
-
 proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
     variable entries;
