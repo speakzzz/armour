@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092201"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092300"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -6672,10 +6672,11 @@ proc entry:matches {method value nick ident host {xuser 0} {rname ""}} {
 # -- among the non-op, non-bot users currently on $chan, how many would a new entry hit?
 # -- returns a list: {count nick1 nick2 ...} (nicks capped for display by the caller)
 proc add:matchusers {chan method value} {
+    global botnick;  # -- eggdrop's own nick; there is no cfg(botnick) setting
     set hits [list]
     if {[catch {chanlist $chan} users]} { return {0} }
     foreach n $users {
-        if {[string equal -nocase $n [cfg:get botnick *]]} { continue }
+        if {[string equal -nocase $n $botnick]} { continue }
         set uh [getchanhost $n $chan]
         if {$uh eq ""} { continue }
         set ident [lindex [split $uh @] 0]
@@ -6710,6 +6711,49 @@ proc add:conflicts {chan method value newtype} {
     return $out
 }
 
+# -- which channels should add's advisory notes cover?  a channel-specific entry covers that one
+# -- channel; a global (*) entry applies on every channel the bot is on, so report them all.
+# -- falls back to the channel the command came from if the bot reports none.
+proc add:feedback:chans {chan starget {max 20}} {
+    if {$chan ne "*"} {
+        return [expr {[string index $chan 0] eq "#" ? [list $chan] : [list]}]
+    }
+    set out [list]
+    if {![catch {channels} chans]} {
+        foreach c $chans {
+            if {[string index $c 0] eq "#"} { lappend out $c }
+            if {[llength $out] >= $max} { break }
+        }
+    }
+    if {[llength $out] == 0} {
+        set c [lindex [split $starget] 0]
+        if {[string index $c 0] eq "#"} { lappend out $c }
+    }
+    return $out
+}
+
+# -- channel +b bans that would keep out a host covered by a new whitelist host entry $value.
+# -- a ban mask (nick!user@host glob) blocks the entry if the mask matches, or is matched by, the
+# -- whitelisted host in any of the host / *@host / *!*@host forms.  advisory; returns a list of masks.
+proc add:blockingbans {chan value} {
+    set out [list]
+    if {[catch {chanbans $chan} bans]} { return {} }
+    foreach b $bans {
+        set mask [lindex $b 0]
+        if {$mask eq ""} { continue }
+        # -- the host part of the ban mask
+        set bhost [string range $mask [expr {[string first "@" $mask] + 1}] end]
+        set forms [list $value "*!*@$value" "*@$value"]
+        set hit 0
+        foreach f $forms {
+            if {[string match -nocase $mask $f] || [string match -nocase $f $mask]} { set hit 1; break }
+            if {[string match -nocase $value $bhost] || [string match -nocase $bhost $value]} { set hit 1; break }
+        }
+        if {$hit} { lappend out $mask }
+    }
+    return $out
+}
+
 proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
     variable entries;
@@ -6720,6 +6764,15 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     variable dbchans;
 
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
+
+    # -- pull the -unban flag out of the argument before anything parses it, so it cannot end up
+    # -- in the value, the action, or the stored reason
+    set dounban 0
+    set _words [list]
+    foreach _w [regexp -all -inline {\S+} $arg] {
+        if {[string equal -nocase $_w "-unban"]} { set dounban 1 } else { lappend _words $_w }
+    }
+    if {$dounban} { set arg [join $_words " "] }
 
     set cmd "add"
     lassign [db:get id,user users curnick $nick] uid user
@@ -7000,6 +7053,22 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
             debug 4 "\002cmd:add:\002 iaction: $iaction (action: $action) -- ilimit: $ilimit (limit: $limit) -- iflags: $iflags (flags: $flags)"
 
             if {$action eq $iaction && $limit eq $ilimit && $flags eq $iflags} {
+                # -- entry already exists: -unban still lifts channel bans blocking a white host entry
+                if {$dounban && $list eq "white" && $method eq "host"} {
+                    set utotal 0; set uparts [list]
+                    foreach ubchan [add:feedback:chans $chan $starget] {
+                        set blocking [add:blockingbans $ubchan $value]
+                        if {[llength $blocking] == 0} { continue }
+                        incr utotal [llength $blocking]
+                        mode:unban $ubchan $blocking
+                        lappend uparts "$ubchan: [join [lrange $blocking 0 3] {, }]"
+                    }
+                    if {$utotal > 0} {
+                        reply $type $target "\002note:\002 lifted $utotal ban[expr {$utotal==1?"":"s"}] on [join [lrange $uparts 0 3] {; }][expr {[llength $uparts] > 4 ? " ..." : ""}]"
+                    } else {
+                        reply $type $target "\002note:\002 no active bans block this entry."
+                    }
+                }
                 reply $type $target "\002error:\002 a matching ${list}list entry with identical behaviour already exists. (\002id:\002 $id -- \002type:\002 $method -- \002value:\002 $value)";
                 return;        
             }
@@ -7035,19 +7104,50 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         # -- advisory feedback: which current users this hits, and any conflicting entries.
         # -- purely informational; it never blocks the add.
         if {$method in {host user regex}} {
-            set fbchan [expr {$chan eq "*" ? [lindex [split $starget] 0] : $chan}]
-            if {[string index $fbchan 0] eq "#"} {
+            set fbchans [add:feedback:chans $chan $starget]
+            # -- aggregate matches across every channel the entry will apply on
+            set total 0; set parts [list]
+            foreach fbchan $fbchans {
                 set mu [add:matchusers $fbchan $method $value]
                 set mc [lindex $mu 0]
                 if {$mc > 0} {
-                    set names [lrange $mu 1 6]
-                    set extra [expr {$mc > 6 ? " (+[expr {$mc - 6}] more)" : ""}]
-                    reply $type $target "\002note:\002 matches $mc user[expr {$mc==1?"":"s"}] now on $fbchan: [join $names {, }]$extra"
+                    incr total $mc
+                    lappend parts "$fbchan: [join [lrange $mu 1 4] {, }][expr {$mc > 4 ? " +[expr {$mc - 4}]" : ""}]"
                 }
+            }
+            if {$total > 0} {
+                set shown [lrange $parts 0 3]
+                set more [expr {[llength $parts] > 4 ? " ..." : ""}]
+                reply $type $target "\002note:\002 matches $total user[expr {$total==1?"":"s"}] now on [join $shown {; }]$more"
             }
             set conf [add:conflicts $chan $method $value $list]
             if {[llength $conf] > 0} {
                 reply $type $target "\002note:\002 overlaps existing [join [lrange $conf 0 4] {, }][expr {[llength $conf]>5?" ...":""}]"
+            }
+
+            # -- for a whitelist host entry, surface (and optionally lift) channel bans that would
+            # -- still keep the host out.  acting is opt-in via -unban, matching the -force convention.
+            if {$list eq "white" && $method eq "host"} {
+                set btotal 0; set bparts [list]
+                foreach fbchan $fbchans {
+                    set blocking [add:blockingbans $fbchan $value]
+                    if {[llength $blocking] == 0} { continue }
+                    incr btotal [llength $blocking]
+                    if {$dounban} {
+                        mode:unban $fbchan $blocking
+                        lappend bparts "$fbchan: [join [lrange $blocking 0 3] {, }]"
+                    } else {
+                        lappend bparts "$fbchan: [join [lrange $blocking 0 3] {, }]"
+                    }
+                }
+                if {$btotal > 0} {
+                    set bshown [join [lrange $bparts 0 3] {; }][expr {[llength $bparts] > 4 ? " ..." : ""}]
+                    if {$dounban} {
+                        reply $type $target "\002note:\002 lifted $btotal ban[expr {$btotal==1?"":"s"}] on $bshown"
+                    } else {
+                        reply $type $target "\002note:\002 $btotal active ban[expr {$btotal==1?"":"s"}] still block this on $bshown -- repeat the add with \002-unban\002 to lift"
+                    }
+                }
             }
         }
 
