@@ -1,16 +1,124 @@
 # Changelog — speakz-armour
 
-All notable changes in this round of fixes. Dates reflect the `speakz-armour`
-branch. Three of these are security fixes; see **Security** below and upgrade
-promptly.
+All notable changes on the `speakz-armour` branch. Several are security fixes;
+see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 144 tests across 12 suites at time of writing.
+code regresses. 194 tests across 18 suites at time of writing.
+
+Releases are listed newest first.
 
 ---
 
-## Security
+## Unreleased
+
+Follow-up round: fixes for issues found while running the previous release, and
+the remaining hardening items.
+
+### Security
+
+- **Password written to the command log.** `set pass <password>` logged the raw
+  command. The handler computed a masked value (`"pass"`) specifically to avoid
+  this, then logged the raw argument anyway. `cmdlog` is readable via `showlog`
+  (level 500). It now logs the masked value. *(Existing `SET` rows in `cmdlog`
+  may still contain passwords — worth clearing.)*
+
+- **Passwords are now salted and iterated.** Unsalted MD5 is fast to attack
+  offline and identical for two users who choose the same password. New hashes
+  are a random 16-byte salt (from `/dev/urandom`) plus iterated SHA-256, stored
+  as `sha256:<iterations>:<salt>:<hash>`. Old MD5 hashes keep working and are
+  re-stored salted on the user's next successful login, so **nobody has to reset
+  a password**. Only an *exact* match upgrades — a legacy (list-parsed) match
+  encodes a mangled form, and re-saving the typed text could lock the user out.
+  Iterations are 1000 (~0.25s per check): eggdrop is single-threaded, so a much
+  higher count would stall the bot on every login.
+
+- **`db:qbind` — SQL with bound parameters.** Values are passed to SQLite as
+  data, so nothing in them can alter the statement: no escaping to remember, and
+  quotes or semicolons in user input are stored verbatim. The sites taking
+  free-form input that were not escaped (the `ignores` lookup/delete by id, the
+  `levels` update in `moduser`) are converted. The remaining queries are migrated
+  incrementally, and `tests/sql.test` now fails if the number of unescaped string
+  interpolations rises above its recorded baseline.
+
+### Fixed
+
+- **Timed bans survive a restart.** A `kickban` scheduled its unban with an
+  eggdrop `timer`, and `mode:rem:b` removes the matching `(auto)` blacklist entry
+  when that ban is lifted. Timers are lost on restart or rehash and nothing
+  re-armed them, so a ban pending at that moment — and its entry — stayed
+  forever. A `tempbans` table now records each timed ban; at startup whatever is
+  overdue is lifted and the rest re-armed. X bans are unaffected (X holds their
+  own duration).
+
+- **`add` accepted unrecognised methods.** `add black i <ip>` created an entry
+  with the method stored literally as `i`: the switch maps `ip`/`net`/`mask` to
+  `host` but had no `i`, and the `usage` flag its default branch sets was never
+  checked. `scan:match` implements only host, user, regex, rname, text, country,
+  asn, chan and last, so such entries were **inert** — present in the list,
+  matching nothing, with no indication. `i` is now accepted, and an unrecognised
+  method or list is refused with the syntax line. *(Any existing entry with a
+  bogus method is inert and should be removed with `rem <id>`.)*
+
+- **Catch-all bans reported as blocking a whitelist entry.** A ban mask whose
+  host part is a bare `*` (i.e. one targeting a nick or ident, such as
+  `*nick*!*@*` or `*!*~ident@*`) matched every host, so it was listed for every
+  whitelist host entry — and `-unban` would have lifted it. Such bans are now
+  skipped; host wildcards that are not bare (`*!*@*.example.org`) still count.
+
+- **A repeat `add … -unban` reported an error.** Repeating the add is the
+  documented way to lift blocking bans, so the entry already existing is the
+  expected case. It now reports what `-unban` did and stops, instead of
+  following the success with "a matching entry already exists". Also fixes
+  subject–verb agreement in the note ("1 ban still **blocks** this").
+
+- **HTTP failures raised `can't read "tok"`.** Every guarded request used
+  `catch {set tok [http::geturl …]} error` and then used `$tok`; when the request
+  threw (DNS failure, refused connection, TLS error) `tok` was never set, so the
+  intended "could not open socket" message became a Tcl error in `bgerror` — and
+  the five `*:errors` handlers called `http::cleanup` on it as well. Fixed at all
+  10 call sites and in every handler.
+
+- **`conf` routing.** The exact-vs-mask decision fetched the value, so a mask
+  query (`conf *auth*`) made `cfg:get` emit a spurious `config error -- setting
+  not found`, and an exact query for one of the nine empty-by-default settings
+  was misreported as "no matching setting(s) found". It now tests existence.
+
+- **`add`'s advisory notes cover every channel a global entry applies to.**
+  For a `*` entry the notes previously reported only the channel the command was
+  typed in; they now aggregate across every channel the bot is on (capped at 20),
+  and work when the entry is added by private message.
+
+### Added
+
+- **Database indexes.** 26 tables had none, so every lookup by a non-key column
+  was a table scan — `settings` on nearly every config read, `levels` on every
+  permission check. 16 indexes are created at startup with
+  `CREATE INDEX IF NOT EXISTS`, so existing databases pick them up on next load.
+
+- **`tests/version.test`** checks `filecount` in `.version` against the files
+  tracked in git (a stale value makes `update install` hang on other bots or
+  install a partial tree) and sanity-checks the `revision` format.
+
+### Upgrade notes
+
+- **No password resets needed.** Users migrate to salted hashes automatically as
+  they log in.
+- The web dashboard's login now uses the shared verifier, so it accepts both hash
+  formats. Its password reset writes the new format.
+- First load creates the `tempbans` table and the indexes automatically. Back up
+  `db/<bot>.db` beforehand as usual.
+- `ban:restore` runs 90 seconds after load and will lift bans that expired while
+  the bot was down.
+- Review existing list entries for bogus methods (`view <id>`); anything outside
+  the supported set never matched anything.
+
+---
+
+## Release — revision 2026092300
+
+### Security
 
 - **Remote command execution via `conf` / `deploy` (level 500).**
   Config files were written with `exec sed -i "s|…|<value>|"`. A value
@@ -56,9 +164,9 @@ code regresses. 144 tests across 12 suites at time of writing.
 
 ---
 
-## Fixed
+### Fixed
 
-### IPv6 / networking
+#### IPv6 / networking
 
 - **`cidr:match` mishandled compressed IPv6.** The `::` expansion counted
   colons incorrectly and produced 112 bits instead of 128, so a blacklist entry
@@ -77,7 +185,7 @@ code regresses. 144 tests across 12 suites at time of writing.
   more than one AS shifted every field and blanked the country/ASN. Now parses
   on the pipe and validates the field count.
 
-### WHO / scanning
+#### WHO / scanning
 
 - **`raw:genwho` (352) parsing.** The reply was parsed as a Tcl list, so a
   realname containing an unbalanced brace or quote threw and the client was
@@ -95,7 +203,7 @@ code regresses. 144 tests across 12 suites at time of writing.
   `arm::scan` and aborted the scan of any IPv6 client reaching a CIDR entry.
   Qualified as `::scan`.
 
-### TOTP (X login)
+#### TOTP (X login)
 
 - **TOTP token generation.** The X login shelled out to `oathtool --totp
   <secret>`, which reads its argument as **hex** unless given `-b`; a base32
@@ -105,7 +213,7 @@ code regresses. 144 tests across 12 suites at time of writing.
   bundled RFC 6238 implementation; `oathtool` is no longer required. Verified
   against RFC 4226/6238 vectors and `oathtool`.
 
-### Passwords
+#### Passwords
 
 - **`newpass` / `login` lockout.** The two commands extracted the password
   differently (`[lrange]` vs `[join [lrange]]`), so any password containing
@@ -124,7 +232,7 @@ code regresses. 144 tests across 12 suites at time of writing.
   variable) and would have logged out the requester instead of the target. Now
   logs out the target.
 
-### Command text (reasons, topics, messages, values)
+#### Command text (reasons, topics, messages, values)
 
 - **`kick`, `ban`, `topic`, `say`, `black`, `add`** list-parsed their
   reason / topic / message / value, which rewrote `\ { } "`. They now use
@@ -135,7 +243,7 @@ code regresses. 144 tests across 12 suites at time of writing.
 
 - **`set` values** (greet, city, email, …) are stored as typed.
 
-### Command handlers (robustness)
+#### Command handlers (robustness)
 
 - **Log lines no longer list-parse the argument.** 74 log lines across the
   command handlers built their entry with `[join $arg]`, so text containing an
@@ -149,13 +257,13 @@ code regresses. 144 tests across 12 suites at time of writing.
   edited reason like `don't spam` showed as `don''t spam` until the next restart
   (the database row was correct). Its argument parsing is now verbatim too.
 
-### Autotopic
+#### Autotopic
 
 - **`raw:topic` (332)** read the channel topic back through `[lrange]`, altering
   topics containing `[ $ \` or runs of spaces, so autotopic re-set the topic on
   **every check** even when it already matched. The topic is now read verbatim.
 
-### `conf` / `deploy` bugs (beyond the security fix)
+#### `conf` / `deploy` bugs (beyond the security fix)
 
 - `&` in a `conf` value was replaced with the previous line contents (sed treats
   `&` specially); now stored literally.
@@ -173,7 +281,7 @@ code regresses. 144 tests across 12 suites at time of writing.
 
 ---
 
-## Added
+### Added
 
 - **`tests/`** — a `tcltest` suite for every fix above, plus `tests/run.sh` to
   run them all (exits non-zero on failure). Suites: `cidr`, `who`, `topic`,
@@ -197,7 +305,7 @@ code regresses. 144 tests across 12 suites at time of writing.
 
 ---
 
-## Upgrade notes
+### Upgrade notes
 
 - **Existing password hashes keep working.** No user needs to reset a password.
   The web dashboard's login was not changed, so a user whose password contains
@@ -215,16 +323,8 @@ code regresses. 144 tests across 12 suites at time of writing.
 
 ## Not included / known open items
 
-These were identified but not changed in this round:
+These remain open as of the Unreleased section above:
 
-- Temporary bans do not survive a restart. A `kickban` schedules its unban with
-  eggdrop's `timer`, and `mode:rem:b` deletes the matching (auto) blacklist
-  entry when that ban is lifted — so in normal operation floodnet's
-  `(auto) join flood detected` entries clean themselves up. But timers are lost
-  on restart or rehash, and nothing re-arms them or sweeps expired bans at
-  startup, so any ban pending at that moment stays on the channel and its entry
-  stays in the database indefinitely. Recording ban expiry times and re-arming
-  (or sweeping) at startup would close this.
 - `cfg(ircbl:net)` is referenced by the IRCBL *delete* query but is not defined
   anywhere, so with `cfg(ircbl)` enabled a removal logs a "setting not found"
   config error and sends an empty network field. Dormant while IRCBL is off.
@@ -232,9 +332,8 @@ These were identified but not changed in this round:
 - **TLS certificate verification is not enabled** on any HTTPS connection,
   including the GitHub-based updater. Traffic interception could deliver
   malicious update code. No account required — highest-priority remaining item.
-- Most SQL is still built by string interpolation rather than bound parameters.
-- Passwords are unsalted MD5 (a salted, iterated scheme is the next step; the
-  new matcher makes silent migration on login straightforward).
+- Most SQL is still built by string interpolation; `db:qbind` exists and the
+  count is ratcheted, but the bulk of the migration is outstanding.
 - Updates have no signature/checksum verification.
 - Unbounded growth of some per-nick state arrays; no RFC-1459 casemapping; the
   ircu `raw:who` (354) parser has the same list-parsing issue as 352; the
