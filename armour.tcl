@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092400"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092401"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -15426,6 +15426,12 @@ proc userdb:login {nick uhost user {manual "0"} {chan ""}} {
     variable dbusers; # -- dict to store users in memory
 
     lassign [db:get id,curnick,curhost users user $user] uid curnick curhost
+    # -- an unknown user yields an empty uid; writing dbusers with it creates an entry with no
+    # -- "user" key, which breaks anything iterating the dict (cf. the dbchans corruption)
+    if {$uid eq ""} {
+        debug 0 "\002userdb:login:\002 no such user: $user -- not updating dbusers"
+        return;
+    }
     
     if {$curnick eq $nick && $manual} { reply msg $nick "uhh, you're already logged in. \002try: logout\002"; return; }
     
@@ -15540,6 +15546,10 @@ proc userdb:logout {nick {uhost ""}} {
     set lnick [string tolower $nick]
     set row [lindex [db:query "SELECT id,user,curnick,curhost FROM users WHERE lower(curnick)='[db:escape $lnick]'"] 0]
     lassign $row uid user curnick curhost
+    if {$uid eq ""} {
+        debug 1 "\002userdb:logout:\002 no user record for $nick -- not updating dbusers"
+        return;
+    }
     if {$user ne ""} {
         # -- log them out
         set lastseen [clock seconds]

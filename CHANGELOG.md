@@ -5,7 +5,7 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 194 tests across 18 suites at time of writing.
+code regresses. 201 tests across 19 suites at time of writing.
 
 Releases are listed newest first.
 
@@ -79,6 +79,21 @@ the remaining hardening items.
   intended "could not open socket" message became a Tcl error in `bgerror` — and
   the five `*:errors` handlers called `http::cleanup` on it as well. Fixed at all
   10 call sites and in every handler.
+
+- **`dbchans` corrupted by a mode change on an unregistered channel.** Seen as
+  `key "chan" not known in dictionary` from an unrelated consumer (the `seen`
+  plugin, on an ordinary `+o`). `mode:add:D`, `mode:rem:D` and `flud:lock` take
+  the channel id from a `dict filter` that yields `""` when the channel is not
+  registered, and `modchan` takes it from a database lookup it never checked;
+  writing `dbchans` with that empty key created an entry holding only the
+  setting and no `chan`. 31 places read `chan` out of that dict, so the next one
+  to iterate it threw. The lookups now reduce the id to a scalar and every write
+  checks the entry exists; `modchan` refuses an unregistered channel. The same
+  guard is applied to `dbusers` in `userdb:login`/`userdb:logout`, which could
+  produce an entry with no `user` key the same way.
+  *(`dbchans` is rebuilt from the database at load, so existing corruption
+  clears on restart; to clear it live:
+  `.tcl set ::arm::dbchans [dict remove $::arm::dbchans ""]`)*
 
 - **`conf` routing.** The exact-vs-mask decision fetched the value, so a mask
   query (`conf *auth*`) made `cfg:get` emit a spurious `config error -- setting
