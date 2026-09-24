@@ -5565,7 +5565,7 @@ proc arm:cmd:mode {0 1 2 3 {4 ""} {5 ""}} {
     db:close
     set chan:modeid($id) $mode;       # -- mode by chanid; TODO: deprecated?
     set chan:mode($lchan) $mode;      # -- mode by chan;   TODO: deprecated?
-    dict set dbchans $id mode $mode;  # -- dict: channel mode
+    if {$id ne "" && [dict exists $dbchans $id]} { dict set dbchans $id mode $mode }; # -- dict: channel mode
     
     # -- flush any existing trackers (safety net)
     set leavelist [get:val scan:list leave,$lchan]
@@ -9840,7 +9840,8 @@ proc mode:add:D {nick uhost hand chan mode target} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
         }]]
-        dict set dbchans $cid mode secure;  # -- dict: channel mode
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
+        if {$cid ne "" && [dict exists $dbchans $cid]} { dict set dbchans $cid mode secure }; # -- dict: channel mode
         if {![info exists voicecache($chan)]} {
             reply pub $chan "changed mode to: secure"
         }
@@ -9878,7 +9879,8 @@ proc mode:rem:D {nick uhost hand chan mode target} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
         }]]
-        dict set dbchans $cid mode on;  # -- dict: channel mode
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
+        if {$cid ne "" && [dict exists $dbchans $cid]} { dict set dbchans $cid mode on }; # -- dict: channel mode
         if {![info exists voicecache($chan)]} {
             # -- only report if not automatically removing mode after a floodnet detection window expiry
             reply pub $chan "changed mode to: \002on\002"
@@ -10064,6 +10066,7 @@ proc mode:add:o {nick uhost hand chan mode target} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
         }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
         float:check:chan $cid
         set atopic:topic($lchan) 1; # -- track for RAW 332 response
         debug 4 "mode:add:o: sending to server: TOPIC $chan"
@@ -12339,7 +12342,8 @@ proc flud:lock {chan} {
                 set cid [dict keys [dict filter $dbchans script {id dictData} { 
                     expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
                 }]]
-                dict set dbchans $cid mode "secure";  # -- dict: channel mode
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
+                if {$cid ne "" && [dict exists $dbchans $cid]} { dict set dbchans $cid mode "secure" }; # -- dict: channel mode
                 set voicecache($chan) [list]
                 set clist [chanlist $chan]
                 foreach n $clist {
@@ -13652,6 +13656,12 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
         set ttype [lindex $arg 0]; set value [lrange $arg 1 end]
     }
     set cid [db:get id channels chan $chan]
+    # -- an unknown channel yields an empty cid; writing dbchans with it creates an entry with no
+    # -- "chan" key, which breaks every consumer that iterates the dict (see mode:add:D et al)
+    if {$cid eq ""} {
+        reply $stype $starget "\002error:\002 channel \002$chan\002 is not registered."
+        return;
+    }
     set lchan [string tolower $chan]
     set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
@@ -14355,6 +14365,7 @@ proc userdb:cmd:verify {0 1 2 3 {4 ""}  {5 ""}} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $target]} 
         }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
         if {$cid ne ""} {
             set tuh [getchanhost $trgnick]
             if {$tuh ne ""} { 
@@ -18288,6 +18299,7 @@ proc kick:chan {chan kicklist reason} {
     set cid [dict keys [dict filter $dbchans script {id dictData} { 
         expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
     }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
     foreach nick $kicklist {
         set nick [join $nick]
         if {![onchan $nick $chan] && [dict get $dbchans $cid mode] ne "secure"} { continue; }
@@ -19055,6 +19067,7 @@ proc atopic:set {chan {topic ""}} {
     set cid [dict keys [dict filter $dbchans script {id dictData} { 
         expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
     }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
     if {$cid eq ""} { return; }; # -- chan not registered
     set autotopic [db:get value settings setting "autotopic" cid $cid]
     if {$autotopic eq "" || $autotopic eq "off"} { return; }; # -- autotopic not on
@@ -20601,6 +20614,7 @@ foreach chan [channels] {
     set cid [dict keys [dict filter $dbchans script {id dictData} { 
         expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
     }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
     if {$cid eq ""} { lappend clist $chan }
 }
 set cfg(chan:login) "[join $clist]"
