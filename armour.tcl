@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092401"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092402"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -1253,6 +1253,33 @@ proc db:init {} {
 }
 db:init; # -- initialise!
 utimer 90 "arm::ban:restore"; # -- re-arm timed bans recorded before the last restart
+
+# -- eggdrop keeps binds in the interpreter, not in the script that created them, so a bind
+# -- registered by a plugin survives a rehash after that plugin is no longer loaded.  it then fires
+# -- on schedule forever against a command that does not exist:
+# --     Tcl error [::arm::ask:cron]: invalid command name "::arm::ask:cron"
+# -- only a full restart cleared them.  this drops any bind whose target command is undefined.
+proc binds:sweep {} {
+    set removed 0
+    foreach btype {cron time pub pubm msg msgm notc ctcp raw evnt} {
+        if {[catch {binds $btype} blist]} { continue }
+        foreach b $blist {
+            lassign $b type flags mask hits cmd
+            set first [lindex $cmd 0]
+            if {$first eq ""} { continue }
+            if {[info commands $first] ne "" || [info commands ::$first] ne ""} { continue }
+            if {[catch {unbind $type $flags $mask $cmd} err]} {
+                debug 1 "\002binds:sweep:\002 could not unbind stale $type bind ($mask -> $cmd): $err"
+                continue
+            }
+            incr removed
+            debug 0 "\002binds:sweep:\002 removed stale $type bind: $mask -> $cmd"
+        }
+    }
+    if {$removed} { debug 0 "\002binds:sweep:\002 removed $removed stale bind[expr {$removed == 1 ? "" : "s"}]" }
+    return $removed
+}
+utimer 120 "arm::binds:sweep"; # -- after plugins have loaded, drop binds left by unloaded ones
 
 db:connect
 
