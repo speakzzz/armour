@@ -64,8 +64,9 @@ package require json
 package require http 2
 package require tls 1.7
 
-bind cron - "0 * * * *" arm::ask:cron;          # -- hourly file cleanup cronjob, on the hour
-bind cron - "30 */3 * * *" arm::ask:cron:image; # -- cronjob every 3 hours at 30mins past the hours
+# -- note: ask:cron and ask:cron:image belong to the openai plugin, which binds them itself.
+# -- binding them here registered binds this plugin cannot satisfy (and double-bound them when
+# -- both plugins were loaded, running the cleanup twice an hour).
 
 bind pubm - "*" arm::sumlog:pubm
 
@@ -397,6 +398,7 @@ proc summarise:query {what cid uid key userprefix} {
 
     debug 3 "\002summarise:query:\002 POST JSON: $json"
 
+    set tok ""; # -- so a failed request leaves $tok defined
     catch {set tok [http::geturl $cfgurl \
         -method POST \
         -binary 1 \
@@ -436,6 +438,9 @@ proc summarise:query {what cid uid key userprefix} {
 
 # -- abstraction to check for HTTP errors
 proc summarise:errors {cfgurl tok error} {
+    # -- the request never returned a token (DNS failure, refused connection, TLS error):
+    # -- there is nothing to clean up or inspect, so report the error as-is
+    if {![info exists tok] || $tok eq ""} { return [list 1 [expr {$error ne "" ? $error : "request failed"}]] }
     debug 0 "\002ask:errors:\002 checking for errors...(error: $error)"
     if {[string match -nocase "*couldn't open socket*" $error]} {
         debug 0 "\002ask:errors:\002 could not open socket to $cfgurl."
