@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092302"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092400"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -1073,6 +1073,24 @@ proc db:escape {what} { return [string map {' ''} $what] }
 proc db:last:rowid {} { armsql last_insert_rowid }
 
 # -- query abstract
+# -- run a query with bound parameters instead of string interpolation.
+# -- values are passed to SQLite as data, so nothing in them can alter the statement -- no escaping,
+# -- and no way for a quote or a semicolon in user input to change what runs:
+# --   db:qbind {SELECT id FROM users WHERE user = :user} user $nick
+# -- returns rows exactly as db:query does.
+proc db:qbind {query args} {
+    if {[llength $args] % 2} { error "db:qbind: parameters must be name/value pairs" }
+    foreach {_qb_name _qb_value} $args { set $_qb_name $_qb_value }
+    unset -nocomplain _qb_name _qb_value
+    set res {}
+    armsql eval $query v {
+        set row {}
+        foreach col $v(*) { lappend row $v($col) }
+        lappend res $row
+    }
+    return $res
+}
+
 proc db:query {query} {
     set res {}
     armsql eval $query v {
@@ -1234,6 +1252,7 @@ proc db:init {} {
     db:close
 }
 db:init; # -- initialise!
+utimer 90 "arm::ban:restore"; # -- re-arm timed bans recorded before the last restart
 
 db:connect
 
@@ -1316,6 +1335,40 @@ db:query "CREATE TABLE IF NOT EXISTS trakka (\
     type TEXT NOT NULL,\
     value TEXT NOT NULL,\
     score INTEGER NOT NULL DEFAULT '1'\
+    )"
+
+# -- indexes: every table above is queried by columns that are not its primary key (settings on
+# -- almost every config read, levels on every permission check, cmdlog and entries as they grow).
+# -- CREATE INDEX IF NOT EXISTS is a no-op once they exist, so this is safe on every start.
+foreach _ix {
+    {idx_levels_uid       levels    (uid)}
+    {idx_levels_cid       levels    (cid)}
+    {idx_levels_cid_uid   levels    (cid,uid)}
+    {idx_settings_cid     settings  (cid,setting)}
+    {idx_settings_uid     settings  (uid,setting)}
+    {idx_entries_cid      entries   (cid)}
+    {idx_entries_type     entries   (type,cid)}
+    {idx_greets_uid       greets    (uid,cid)}
+    {idx_ignores_cid      ignores   (cid)}
+    {idx_captcha_chan     captcha   (chan)}
+    {idx_cmdlog_user      cmdlog    (user_id)}
+    {idx_cmdlog_chan      cmdlog    (chan_id)}
+    {idx_cmdlog_ts        cmdlog    (timestamp)}
+    {idx_notes_to         notes     (to_u)}
+    {idx_notes_from       notes     (from_u)}
+    {idx_tempbans_chan    tempbans  (chan,mask)}
+} {
+    lassign $_ix _name _table _cols
+    catch { db:query "CREATE INDEX IF NOT EXISTS $_name ON $_table $_cols" }
+}
+unset -nocomplain _ix _name _table _cols
+
+# -- create tempbans table (timed server bans, so they survive a restart)
+db:query "CREATE TABLE IF NOT EXISTS tempbans (\
+    id INTEGER PRIMARY KEY AUTOINCREMENT,\
+    chan TEXT,\
+    mask TEXT,\
+    expire INT\
     )"
 
 # -- create captcha table
@@ -3894,6 +3947,49 @@ proc chanlist:hit {chan nick uhost chanlist} {
 set ::optimize-kicks 0
 
 # -- kickban handler
+# -- timed server bans are unbanned by an eggdrop timer, and timers do not survive a restart or
+# -- rehash: the ban (and any (auto) blacklist entry mode:rem:b would have removed with it) then
+# -- stays forever.  these three keep a record so the schedule survives.
+
+# -- record a timed ban, due to be lifted $mins minutes from now
+proc ban:remember {chan mask mins} {
+    if {$mins <= 0} { return }
+    set expire [expr {[clock seconds] + ($mins * 60)}]
+    set dbchan [db:escape $chan]; set dbmask [db:escape $mask]
+    db:query "DELETE FROM tempbans WHERE chan='$dbchan' AND mask='$dbmask'"
+    db:query "INSERT INTO tempbans (chan,mask,expire) VALUES ('$dbchan','$dbmask','$expire')"
+    debug 3 "\002ban:remember:\002 $mask on $chan expires in $mins min"
+}
+
+# -- forget a ban that has been lifted
+proc ban:forget {chan mask} {
+    db:query "DELETE FROM tempbans WHERE chan='[db:escape $chan]' AND mask='[db:escape $mask]'"
+}
+
+# -- re-arm (or action) the timed bans recorded before the last restart
+proc ban:restore {} {
+    set now [clock seconds]
+    set due 0; set armed 0
+    foreach row [db:query "SELECT chan,mask,expire FROM tempbans"] {
+        lassign $row chan mask expire
+        if {$chan eq "" || $mask eq ""} { continue }
+        if {$expire <= $now} {
+            # -- already due: lift it now
+            incr due
+            catch { mode:unban $chan [list $mask] }
+            ban:forget $chan $mask
+        } else {
+            # -- still pending: re-arm for the remaining time (timer takes whole minutes)
+            set mins [expr {($expire - $now + 59) / 60}]
+            incr armed
+            catch { timer $mins "arm::mode:unban $chan [list $mask]" }
+        }
+    }
+    if {$due || $armed} {
+        debug 0 "\002ban:restore:\002 restored timed bans -- lifted $due expired, re-armed $armed"
+    }
+}
+
 proc kickban {nick ident host chan duration reason {id ""}} {
     variable cfg
     variable data:chanban;   # -- state: tracks recently banned masks for a channel (by 'chan,mask')
@@ -3998,20 +4094,27 @@ proc kickban {nick ident host chan duration reason {id ""}} {
             # -- unit is hours
             set time [expr $time * 60]
             timer $time "arm::mode:unban $chan $mask"
+            set bmins $time
         } elseif {$unit eq "s"} {
             # -- unit is secs
             utimer $time "arm::mode:unban $chan $mask"
+            set bmins [expr {($time + 59) / 60}]
         } elseif {$unit eq "m"} {
             # -- unit is mins
             timer $time "arm::mode:unban $chan $mask"
+            set bmins $time
         } elseif {$unit eq "d"} {
             # -- unit is days
             set time [expr $time * 1440]
             timer $time "arm::mode:unban $chan $mask"
+            set bmins $time
         } else {
             # -- just use mins
             timer $time "arm::mode:unban $chan $mask"
-        }        
+            set bmins $time
+        }
+        # -- remember it, so the unban still happens if the bot restarts before the timer fires
+        catch { ban:remember $chan $mask $bmins }
     } elseif {[cfg:get chan:method $chan] in "2 3"} {
         # -- X ban
         # -- TODO: support non-gnuworld services
@@ -6801,6 +6904,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         xuser     { set method "user"    }
         host      { set method "host"    }
         h         { set method "host"    }
+        i         { set method "host"    }
         ip        { set method "host"    }
         net       { set method "host"    }
         mask      { set method "host"    }
@@ -6844,6 +6948,13 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     } else { set xtra2 " \[reason\]" }
 
     set syntax "\002usage:\002 add ?chan? <white|black${xtra1}> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? $xtra2"
+
+    # -- an unrecognised list or method set $usage above; without this check the entry was created
+    # -- with the bogus method stored verbatim (e.g. "i"), and scan:match never matches it
+    if {$usage} {
+        reply $stype $starget $syntax
+        return;
+    }
 
 	# Check for missing value or method FIRST for general usage
     if {$value eq "" || $method eq ""} {
@@ -8086,7 +8197,7 @@ proc arm:cmd:ignore {0 1 2 3 {4 ""} {5 ""}} {
         db:connect
         if {[string is digit $mask]} {
             set itype "ID"
-            set res [db:query "SELECT mask FROM ignores WHERE id='$mask' AND cid='$cid'"]
+            set res [db:qbind {SELECT mask FROM ignores WHERE id = :mask AND cid = :cid} mask $mask cid $cid]
         } else {
             set itype "mask"
             set res [db:query "SELECT mask FROM ignores WHERE lower(mask)='[string tolower $mask]' AND cid='$cid'"]
@@ -8102,7 +8213,7 @@ proc arm:cmd:ignore {0 1 2 3 {4 ""} {5 ""}} {
         }
         db:connect
         if {[string is digit $mask]} {
-            db:query "DELETE FROM ignores WHERE id='$mask' AND cid='$cid'"
+            db:qbind {DELETE FROM ignores WHERE id = :mask AND cid = :cid} mask $mask cid $cid
         } else {
             db:query "DELETE FROM ignores WHERE lower(mask)='[string tolower $mask]' AND cid='$cid'"
         }
@@ -12522,7 +12633,7 @@ proc userdb:msg:inituser {nick uhost hand arg} {
         set rand 1
     } else { set password $firstpass; set rand 0 }
     
-    set encpass [userdb:encrypt $password]; # -- hashed password
+    set encpass [userdb:hash $password]; # -- hashed password
     db:connect
     set db_user [db:escape $user]
     set db_xuser [db:escape $account]
@@ -13949,7 +14060,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
         # -- ircd does not support ACCOUNT
         set xuser ""
         set newpass [randpass];                # -- random password
-        set encpass [userdb:encrypt $newpass]; # -- hashed random password
+        set encpass [userdb:hash $newpass]; # -- hashed random password
     }
 
     # -- what global level to use?
@@ -14060,7 +14171,7 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
         # -- generate a password
         set genpass [randpass]; # -- default length from config, and chars from proc
         # -- encrypt given pass
-        set encpass [userdb:encrypt $genpass]
+        set encpass [userdb:hash $genpass]
     }
     
     if {$globlvl ne ""} {
@@ -14292,6 +14403,59 @@ proc userdb:pub:login {nick uhost hand chan arg} {
 
 # -- command: login
 # login <user> <passphrase>
+# -- password hashing.
+# -- historically passwords were stored as unsalted MD5, which is fast to attack and identical for
+# -- two users with the same password.  new hashes use a random 16-byte salt and iterated SHA-256,
+# -- stored as:  sha256:<iterations>:<salt-hex>:<hash-hex>
+# -- old MD5 hashes keep working and are upgraded in place on a successful login (see
+# -- userdb:pass:match), so nobody has to reset a password.
+variable passiter 1000;  # -- ~0.25s per check here; eggdrop is single-threaded, so keep it modest
+
+# -- 16 random bytes as hex, from the system CSPRNG where available
+proc userdb:salt {} {
+    if {![catch {
+        set fh [open /dev/urandom rb]; set raw [read $fh 16]; close $fh
+    }] && [string length $raw] == 16} {
+        return [binary encode hex $raw]
+    }
+    # -- fallback: weaker, but still per-user unique
+    set seed "[clock clicks][pid][clock seconds][expr {rand()}]"
+    return [string range [string tolower [::sha2::sha256 -hex $seed]] 0 31]
+}
+
+# -- derive the stored form.  pass an existing $stored to re-derive with its salt and iterations.
+proc userdb:hash {pass {stored ""}} {
+    variable passiter
+    set iter $passiter
+    set salt ""
+    if {$stored ne ""} {
+        set parts [split $stored ":"]
+        if {[llength $parts] == 4 && [lindex $parts 0] eq "sha256"} {
+            set iter [lindex $parts 1]
+            set salt [lindex $parts 2]
+        }
+    }
+    if {$salt eq ""} { set salt [userdb:salt] }
+    if {![string is integer -strict $iter] || $iter < 1} { set iter $passiter }
+    set h [::sha2::sha256 -bin "$salt$pass"]
+    for {set i 0} {$i < $iter} {incr i} { set h [::sha2::sha256 -bin "$h$salt"] }
+    return "sha256:$iter:$salt:[string tolower [binary encode hex $h]]"
+}
+
+# -- is this a new-format hash?
+proc userdb:hash:isnew {stored} {
+    return [expr {[string match "sha256:*" $stored] && [llength [split $stored ":"]] == 4}]
+}
+
+# -- verify a password against either hash format
+proc userdb:pass:verify {pass stored} {
+    if {$stored eq "" || $pass eq ""} { return 0 }
+    if {[userdb:hash:isnew $stored]} {
+        return [expr {[userdb:hash $pass $stored] eq $stored}]
+    }
+    return [expr {[userdb:encrypt $pass] eq $stored}]
+}
+
 # -- does the password typed in $arg (after the first $n words) match a stored hash?
 # -- returns "exact", "legacy", or "" for no match.
 # -- older versions list-parsed the password before hashing it, in one of two ways: login and
@@ -14305,6 +14469,10 @@ proc userdb:pass:match {arg n storepass} {
     if {$storepass eq ""} { return "" }
     set pass [arg:tail $arg $n]
     if {$pass eq ""} { return "" }
+    if {[userdb:hash:isnew $storepass]} {
+        # -- new-format hash: no legacy list-parsed forms to consider
+        return [expr {[userdb:pass:verify $pass $storepass] ? "exact" : ""}]
+    }
     if {[userdb:encrypt $pass] eq $storepass} { return "exact" }
     foreach form {join list} {
         # -- a legacy form that cannot be parsed (unbalanced brace or quote) cannot match
@@ -14365,6 +14533,13 @@ proc userdb:msg:login {nick uhost hand arg} {
         # -- match successful, login
         debug 0 "userdb:msg:login: password match for $user, login successful"
         if {$match eq "legacy"} { debug 1 "userdb:msg:login: $user matched a legacy (list-parsed) password hash" }
+        if {$match eq "exact" && ![userdb:hash:isnew $storepass]} {
+            # -- the typed password is definitely correct and was not list-parsed, so it is safe to
+            # -- re-store it as a salted hash.  a "legacy" match is deliberately not upgraded: the
+            # -- stored hash encodes a mangled form, and re-saving the typed text could lock the user out
+            userdb:user:set pass [userdb:hash $pass] user $user
+            debug 0 "userdb:msg:login: upgraded $user to a salted password hash"
+        }
         userdb:login $nick $uhost $user 1;  # -- send to common login code
                 
         # -- create log entry for command use
@@ -14492,7 +14667,7 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         if {$tvalue eq $tlevel} { reply $type $target "\002(\002error\002)\002 what's the point?"; return; }
         # -- make the change
         db:connect
-        set query [db:query "UPDATE levels SET level='$tvalue' WHERE cid=$cid AND uid=$tuid"]
+        set query [db:qbind {UPDATE levels SET level = :tvalue WHERE cid = :cid AND uid = :tuid} tvalue $tvalue cid $cid tuid $tuid]
         db:close
         
         # -- send a note to the user?
@@ -14588,7 +14763,7 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
             if {$tcurnick ne ""} { set xtra "password sent via /notice" }
         } else { set newpass $tvalue }
         set xtra2 "password is $newpass"
-        set encpass [userdb:encrypt $newpass]; # -- hashed random password
+        set encpass [userdb:hash $newpass]; # -- hashed random password
         userdb:user:set pass $encpass id $tuid
         dict set dbusers $tuid pass $encpass
         reply $type $target "done. $xtra"
@@ -14778,7 +14953,7 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
     }
            
     if {$ttype eq "pass"} { 
-        set encpass [userdb:encrypt $tvalue];     # -- encrypt password
+        set encpass [userdb:hash $tvalue];     # -- encrypt password
         debug 0 "userdb:cmd:set: user $user ($nick![getchanhost $nick]) set password"
         userdb:user:set pass $encpass user $user; # -- make the change
     }
@@ -15007,7 +15182,7 @@ proc userdb:msg:newpass {nick uhost hand arg} {
     if {$user eq ""} { reply notc $nick "\002(\002error\002)\002 perhaps not. login first."; return; }
      
     # -- encrypt given pass
-    set encrypt [userdb:encrypt $newpass]
+    set encrypt [userdb:hash $newpass]
         
     debug 1 "userdb:msg:newpass: updating password for user: $user ($nick!$uhost)"
         
@@ -17202,6 +17377,7 @@ proc ipqs:query {ip} {
     set url "$cfgurl/[cfg:get ipqs:key *]/$ip"
 
     debug 3 "\002ipqs:query:\002 querying url: $url"
+    set tok ""; # -- so a failed request leaves $tok defined
     catch {set tok [http::geturl $url -keepalive 1 -timeout 3000]} error
     # -- TODO: for some reason, this coroutine doesn't return
     #coroexec http::geturl $url -keepalive 1 -timeout 5000 -command [info coroutine]
@@ -17209,9 +17385,9 @@ proc ipqs:query {ip} {
     #set error ""; # -- TODO: fix generic error check
 
     debug 5 "ipqs: checking for errors...(tok: $tok -- error: $error)"
-    if {[string match -nocase "*couldn't open socket*" $error]} {
+    if {$tok eq "" || [string match -nocase "*couldn't open socket*" $error]} {
         debug 0 "\002ipqs:query:\002 could not open socket to: $url"
-        http::cleanup $tok
+        catch { http::cleanup $tok }
         return "-1 [list "unable to open socket"]"
     } 
     
@@ -18189,6 +18365,8 @@ proc mode:ban {chan banlist reason {duration "7d"} {level "100"} {notnext ""}} {
 
 # -- abstract to handle UNBANs via server or services
 proc mode:unban {chan unbanlist} {
+    # -- these bans are no longer pending: drop any restart records for them
+    foreach _m $unbanlist { catch { ban:forget $chan $_m } }
     if {$unbanlist eq ""} { 
         debug 0 "mode:unban: no nicks provided for UNBAN in $chan"
         return;
