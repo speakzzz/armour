@@ -394,7 +394,12 @@ proc summarise:query {what cid uid key userprefix} {
         set ask($key) "{\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
     }
 
-    set json "{\"model\": \"$model\", \"messages\": \[$ask($key)\], \"temperature\": [cfg:get ask:temp *]}"
+    # -- newer models reject a non-default temperature; ask:json omits it for them
+    if {[info commands ask:json] ne ""} {
+        set json [ask:json $model $ask($key) [cfg:get ask:temp *]]
+    } else {
+        set json "{\"model\": \"$model\", \"messages\": \[$ask($key)\], \"temperature\": [cfg:get ask:temp *]}"
+    }
 
     debug 3 "\002summarise:query:\002 POST JSON: $json"
 
