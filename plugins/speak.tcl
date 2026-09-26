@@ -30,7 +30,7 @@
 
 
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
+namespace eval ::arm {
 package require json
 package require http 2
 package require tls 1.7
@@ -69,6 +69,7 @@ proc speak:query {what} {
         regsub -all "\\\\n" $data " " data
         debug 3 "\002speak:query:\002 POST data: $data"
 
+        set tok ""; # -- so a failed request leaves $tok defined
         catch {set tok [http::geturl $url \
             -method POST \
             -query $data \
@@ -100,6 +101,7 @@ proc speak:query {what} {
         #debug 3 "speak:query: url: $url"
         debug 3 "\002speak:query:\002 POST data: $data"
 
+        set tok ""; # -- so a failed request leaves $tok defined
         catch {set tok [http::geturl $url \
             -method POST \
             -query $data \
@@ -147,6 +149,9 @@ proc speak:query {what} {
 
 # -- abstraction to check for HTTP errors
 proc speak:errors {url tok error} {
+    # -- the request never returned a token (DNS failure, refused connection, TLS error):
+    # -- there is nothing to clean up or inspect, so report the error as-is
+    if {![info exists tok] || $tok eq ""} { return [list 1 [expr {$error ne "" ? $error : "request failed"}]] }
     debug 0 "\002speak:errors:\002 checking for errors...(error: $error)"
     if {[string match -nocase "*couldn't open socket*" $error]} {
         debug 0 "\002speak:errors:\002 could not open socket to $url."
