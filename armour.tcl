@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026092402"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092600"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -20670,6 +20670,25 @@ init:autologin
 namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
+
+# ------------------------------------------------------------------------------------------------
+# plugin loader -- must be done outside the arm namespace
+# ------------------------------------------------------------------------------------------------
+foreach plugin [array names arm::addplugin] {
+    lassign [array get arm::addplugin $plugin] name file
+    arm::debug 0 "Armour: loading plugin $name ... (file: $file)"
+    catch {source $file} error
+    if {$error ne ""} {
+        arm::debug 0 "\002(plugin load error)\002:$name\: $::errorInfo"
+    }
+}
+# ------------------------------------------------------------------------------------------------
+# -- NOTE: these checks were previously ABOVE the plugin loader.  They test for a plugin's procs to
+# -- decide whether to keep its commands, but nothing had been sourced at that point, so every
+# -- plugin-dependent command (ask, and, askmode, image, speak, joke, gif, score, seen, ...) was
+# -- unset regardless.  They run here instead, after the loader and before loadcmds.
+# -- (this region is already inside 'namespace eval arm', so the block must NOT be wrapped again)
+
 # -- disable commands if 'openai' plugin not loaded
     if {([info commands ask:query] eq "" && [info commands arm:cmd:ask] eq "")} {
     if {[info exists addcmd(ask)]} { unset addcmd(ask) }
@@ -20732,18 +20751,6 @@ if {[info commands seen:cmd:seen] eq ""} {
     if {[info exists addcmd(seen)]} { unset addcmd(seen) }
 }
 
-# ------------------------------------------------------------------------------------------------
-# plugin loader -- must be done outside the arm namespace
-# ------------------------------------------------------------------------------------------------
-foreach plugin [array names arm::addplugin] {
-    lassign [array get arm::addplugin $plugin] name file
-    arm::debug 0 "Armour: loading plugin $name ... (file: $file)"
-    catch {source $file} error
-    if {$error ne ""} {
-        arm::debug 0 "\002(plugin load error)\002:$name\: $::errorInfo"
-    }
-}
-# ------------------------------------------------------------------------------------------------
 loadcmds; # -- load all commands (incl. plugins)
 # ------------------------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------------------------

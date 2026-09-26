@@ -92,7 +92,7 @@
 
 
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
+namespace eval ::arm {
 # ------------------------------------------------------------------------------------------------
 package require json
 package require http 2
@@ -1161,6 +1161,7 @@ proc ask:query {what first ids key {speak "0"} {userprefix "1"}} {
 
     ::arm::debug 5 "\002ask:query:\002 POST JSON: $json"
 
+    set tok ""; # -- so a failed request leaves $tok defined
     catch {set tok [http::geturl $cfgurl \
         -method POST \
         -binary 1 \
@@ -1255,6 +1256,7 @@ proc ask:dalle {desc {num "1"} {size "512x512"} {image ""}} {
         exec rm $filepath
         exec rm "$filepath.new"
 
+        set tok ""; # -- so a failed request leaves $tok defined
         catch {set tok [http::geturl $url -headers $headers -query $payload -timeout $timeout]} error
         
     } else {
@@ -1343,6 +1345,7 @@ proc ask:dalle {desc {num "1"} {size "512x512"} {image ""}} {
             set desc [encoding convertto utf-8 $desc]; # -- convert to utf-8
             set query [json::dict2json [dict create prompt "\"$desc\"" n $num size "\"$size\"" model "\"$model\""]]
             ::arm::debug 5 "ask:dalle: POST json: $query"
+            set tok ""; # -- so a failed request leaves $tok defined
             catch {set tok [http::geturl $url \
                 -method POST \
                 -query $query \
@@ -1377,6 +1380,7 @@ proc ask:dalle {desc {num "1"} {size "512x512"} {image ""}} {
     #set data [dict get $data b64_json]; # -- the generated base64 encoded image
 
     # -- fetch the image to save locally
+    set tok ""; # -- so a failed request leaves $tok defined
     catch {set tok [http::geturl $url -method GET -timeout $timeout]} error
     # -- connection handling abstraction
     set iserror [::arm::ask:errors $url $tok $error]
@@ -1444,6 +1448,9 @@ proc ask:image {request} {
 
 # -- abstraction to check for HTTP errors
 proc ask:errors {cfgurl tok error} {
+    # -- the request never returned a token (DNS failure, refused connection, TLS error):
+    # -- there is nothing to clean up or inspect, so report the error as-is
+    if {![info exists tok] || $tok eq ""} { return [list 1 [expr {$error ne "" ? $error : "request failed"}]] }
     ::arm::debug 0 "\002ask:errors:\002 checking for errors...(error: $error)"
     if {[string match -nocase "*couldn't open socket*" $error]} {
         ::arm::debug 0 "\002ask:errors:\002 could not open socket to $cfgurl."
