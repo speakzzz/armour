@@ -1086,6 +1086,17 @@ proc arm:cmd:askmode {0 1 2 3 {4 ""}  {5 ""}} {
 }
 
 # -- send ChatGPT API queries
+# -- the GPT-5 generation (and the o-series reasoning models) accept only the default temperature
+# -- and reject the parameter outright:
+# --   openai error: Unsupported value: 'temperature' does not support 0.7 with this model.
+# -- so omit it for those, and for an empty ask:temp.  returns the JSON body for a chat request.
+proc ask:json {model messages temp} {
+    if {$temp eq "" || [regexp -nocase {^(gpt-[5-9]|gpt-[1-9][0-9]|o[1-9])} $model]} {
+        return "{\"model\": \"$model\", \"messages\": \[$messages\]}"
+    }
+    return "{\"model\": \"$model\", \"messages\": \[$messages\], \"temperature\": $temp}"
+}
+
 proc ask:query {what first ids key {speak "0"} {userprefix "1"}} {
     variable ask
     http::config -useragent "mozilla" 
@@ -1144,20 +1155,21 @@ proc ask:query {what first ids key {speak "0"} {userprefix "1"}} {
         if {$askmode ne ""} { set mode "$prefix. $askmode." } else { set mode "$prefix." }
         #set ask($key) "{\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
         set systemrole [::arm::cfg:get ask:system *] 
-        if {$systemrole ne ""} {
-            # -- add system role instruction
-            regsub -all {"} $systemrole {\\"} systemrole
-            set ask($key) "{\"role\": \"system\", \"content\": \"$systemrole\"}, {\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
-        } else {
-            set ask($key) "{\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
-        }
+        # -- the model has no clock and answers date questions from its training data ("it's 2023"),
+        # -- so tell it today's date on every request.  appended to the configured system role, or
+        # -- sent on its own when none is set.
+        set datehint "The current date is [clock format [clock seconds] -format {%A, %d %B %Y}]."
+        if {$systemrole ne ""} { set systemrole "$systemrole $datehint" } else { set systemrole $datehint }
+        # -- add system role instruction
+        regsub -all {"} $systemrole {\\"} systemrole
+        set ask($key) "{\"role\": \"system\", \"content\": \"$systemrole\"}, {\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
 
     } else {
         # -- continuing conversation
         append ask($key) ", {\"role\": \"user\", \"content\": \"$ewhat\"}"
     }
 
-    set json "{\"model\": \"$model\", \"messages\": \[$ask($key)\], \"temperature\": [::arm::cfg:get ask:temp *]}"
+    set json [ask:json $model $ask($key) [::arm::cfg:get ask:temp *]]
 
     ::arm::debug 5 "\002ask:query:\002 POST JSON: $json"
 
