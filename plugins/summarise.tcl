@@ -50,6 +50,22 @@
 
 # ------------------------------------------------------------------------------------------------
 namespace eval ::arm {
+
+# -- JSON string escaping.  normally provided by the openai plugin; defined here too so this
+# -- plugin works when loaded on its own.
+if {[info commands ask:jsonesc] eq ""} {
+    proc ask:jsonesc {str} {
+        set str [string map [list \\ {\\} \" {\"} / {\/}] $str]
+        set str [string map [list \n {\n} \r {\r} \t {\t} \b {\b} \f {\f}] $str]
+        set out ""
+        foreach ch [split $str ""] {
+            ::scan $ch %c code
+            if {$code < 32} { append out [format {\u%04x} $code] } else { append out $ch }
+        }
+        return $out
+    }
+}
+
 # ------------------------------------------------------------------------------------------------
 
 
@@ -307,7 +323,7 @@ proc arm:cmd:summarise {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     set eresponse $response
-    regsub -all {"} $response {\"} eresponse; # -- escape quotes in response
+    set eresponse [ask:jsonesc $response]; # -- escape for JSON (quotes, backslashes, control characters)
     regsub -all {\{} $response {"} response; # -- fix curly braces
     regsub -all {\}} $response {"} response; # -- fix curly braces 
     
@@ -363,7 +379,7 @@ proc summarise:query {what cid uid key userprefix} {
 
     #debug 4 "summarise:query: what: $what"
     
-    regsub -all {"} $what {\\"} ewhat;           # -- escape quotes in question
+    set ewhat [ask:jsonesc $what]; # -- escape for JSON (quotes, backslashes, control characters)
     #regsub -all {<} $ewhat {\<} ewhat;           # -- escape lt
     #regsub -all {>} $ewhat {\>} ewhat;           # -- escape gt
     #regsub -all {\\n} $ewhat {\\\n} ewhat;       # -- retain newlines
@@ -388,7 +404,7 @@ proc summarise:query {what cid uid key userprefix} {
     append systemrole "$userprefix.\\n"
     if {$systemrole ne ""} {
         # -- add system role instruction
-        regsub -all {"} $systemrole {\\"} systemrole
+        set systemrole [ask:jsonesc $systemrole]; # -- escape for JSON (quotes, backslashes, control characters)
         set ask($key) "{\"role\": \"system\", \"content\": \"$systemrole\"}, {\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
     } else {
         set ask($key) "{\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
