@@ -345,13 +345,26 @@ foreach pkg $packages {
     }
 }
 
-# -- oathtool
+# -- normalise and decode a base32 TOTP secret, as issued by authenticator apps
+# -- accepts lowercase, embedded spaces or dashes, and missing "=" padding
+# -- returns the raw key bytes, or "" if the secret is not valid base32
+proc totp:secret {secret} {
+    if {[catch {package require base32}]} { return "" }; # -- tcllib, already required for sha1
+    set s [string toupper [regsub -all -- {[\s-]} $secret ""]]
+    set s [string trimright $s "="]
+    if {$s eq "" || ![regexp -- {^[A-Z2-7]+$} $s]} { return "" }
+    set pad [expr {(8 - [string length $s] % 8) % 8}]
+    append s [string repeat "=" $pad]
+    if {[catch {base32::decode $s} key]} { return "" }
+    return $key
+}
+
+# -- TOTP secret (generated in-tree via onetimepass; oathtool is no longer required)
 if {[cfg:get auth:totp *] ne ""} {
-    debug 0 "\[@\] Armour: checking for \002oathtool\002 ..."
-    set oathtool [lindex [exec whereis oathtool] 1]
-    if {$oathtool eq ""} {
-        debug 0 "\[@\] Armour: \x0304(error)\x03 \002oathtool\002 not found, cannot generate TOTP token. \002Try:\002 sudo $pkgManager $pkg_oathtool"
-        putnotc [cfg:get chan:report] "Armour: \002oathtool\002 not found, cannot generate TOTP token. \002Try:\002 sudo $pkgManager $pkg_oathtool"
+    debug 0 "\[@\] Armour: checking \002auth:totp\002 secret ..."
+    if {[totp:secret [cfg:get auth:totp *]] eq ""} {
+        debug 0 "\[@\] Armour: \x0304(error)\x03 \002auth:totp\002 is not a valid base32 secret (or tcllib base32 is missing) -- TOTP login will fail"
+        putnotc [cfg:get chan:report] "Armour: \002auth:totp\002 is not a valid base32 secret (or tcllib base32 is missing) -- TOTP login will fail"
     }
 }
 
@@ -1032,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2025102802"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026092700"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -1060,6 +1073,24 @@ proc db:escape {what} { return [string map {' ''} $what] }
 proc db:last:rowid {} { armsql last_insert_rowid }
 
 # -- query abstract
+# -- run a query with bound parameters instead of string interpolation.
+# -- values are passed to SQLite as data, so nothing in them can alter the statement -- no escaping,
+# -- and no way for a quote or a semicolon in user input to change what runs:
+# --   db:qbind {SELECT id FROM users WHERE user = :user} user $nick
+# -- returns rows exactly as db:query does.
+proc db:qbind {query args} {
+    if {[llength $args] % 2} { error "db:qbind: parameters must be name/value pairs" }
+    foreach {_qb_name _qb_value} $args { set $_qb_name $_qb_value }
+    unset -nocomplain _qb_name _qb_value
+    set res {}
+    armsql eval $query v {
+        set row {}
+        foreach col $v(*) { lappend row $v($col) }
+        lappend res $row
+    }
+    return $res
+}
+
 proc db:query {query} {
     set res {}
     armsql eval $query v {
@@ -1221,6 +1252,34 @@ proc db:init {} {
     db:close
 }
 db:init; # -- initialise!
+utimer 90 "arm::ban:restore"; # -- re-arm timed bans recorded before the last restart
+
+# -- eggdrop keeps binds in the interpreter, not in the script that created them, so a bind
+# -- registered by a plugin survives a rehash after that plugin is no longer loaded.  it then fires
+# -- on schedule forever against a command that does not exist:
+# --     Tcl error [::arm::ask:cron]: invalid command name "::arm::ask:cron"
+# -- only a full restart cleared them.  this drops any bind whose target command is undefined.
+proc binds:sweep {} {
+    set removed 0
+    foreach btype {cron time pub pubm msg msgm notc ctcp raw evnt} {
+        if {[catch {binds $btype} blist]} { continue }
+        foreach b $blist {
+            lassign $b type flags mask hits cmd
+            set first [lindex $cmd 0]
+            if {$first eq ""} { continue }
+            if {[info commands $first] ne "" || [info commands ::$first] ne ""} { continue }
+            if {[catch {unbind $type $flags $mask $cmd} err]} {
+                debug 1 "\002binds:sweep:\002 could not unbind stale $type bind ($mask -> $cmd): $err"
+                continue
+            }
+            incr removed
+            debug 0 "\002binds:sweep:\002 removed stale $type bind: $mask -> $cmd"
+        }
+    }
+    if {$removed} { debug 0 "\002binds:sweep:\002 removed $removed stale bind[expr {$removed == 1 ? "" : "s"}]" }
+    return $removed
+}
+utimer 120 "arm::binds:sweep"; # -- after plugins have loaded, drop binds left by unloaded ones
 
 db:connect
 
@@ -1303,6 +1362,40 @@ db:query "CREATE TABLE IF NOT EXISTS trakka (\
     type TEXT NOT NULL,\
     value TEXT NOT NULL,\
     score INTEGER NOT NULL DEFAULT '1'\
+    )"
+
+# -- indexes: every table above is queried by columns that are not its primary key (settings on
+# -- almost every config read, levels on every permission check, cmdlog and entries as they grow).
+# -- CREATE INDEX IF NOT EXISTS is a no-op once they exist, so this is safe on every start.
+foreach _ix {
+    {idx_levels_uid       levels    (uid)}
+    {idx_levels_cid       levels    (cid)}
+    {idx_levels_cid_uid   levels    (cid,uid)}
+    {idx_settings_cid     settings  (cid,setting)}
+    {idx_settings_uid     settings  (uid,setting)}
+    {idx_entries_cid      entries   (cid)}
+    {idx_entries_type     entries   (type,cid)}
+    {idx_greets_uid       greets    (uid,cid)}
+    {idx_ignores_cid      ignores   (cid)}
+    {idx_captcha_chan     captcha   (chan)}
+    {idx_cmdlog_user      cmdlog    (user_id)}
+    {idx_cmdlog_chan      cmdlog    (chan_id)}
+    {idx_cmdlog_ts        cmdlog    (timestamp)}
+    {idx_notes_to         notes     (to_u)}
+    {idx_notes_from       notes     (from_u)}
+    {idx_tempbans_chan    tempbans  (chan,mask)}
+} {
+    lassign $_ix _name _table _cols
+    catch { db:query "CREATE INDEX IF NOT EXISTS $_name ON $_table $_cols" }
+}
+unset -nocomplain _ix _name _table _cols
+
+# -- create tempbans table (timed server bans, so they survive a restart)
+db:query "CREATE TABLE IF NOT EXISTS tempbans (\
+    id INTEGER PRIMARY KEY AUTOINCREMENT,\
+    chan TEXT,\
+    mask TEXT,\
+    expire INT\
     )"
 
 # -- create captcha table
@@ -1866,7 +1959,7 @@ proc db:add {list chan method value modifby action limit reason} {
     variable entries;  # -- dict: blacklist and whitelist entries
     variable flud:id;  # -- the id of a given cumulative pattern (by chan,method,value)
     
-    set reason [join $reason]
+    set reason [regsub -all {\s+} [string trim $reason] " "]; # -- collapse whitespace; do NOT list-parse (verbatim text)
     set ts [clock seconds]
     
     # -- always do SQL insert first and use that last row ID (keeping memory in sync with db)
@@ -1910,7 +2003,7 @@ proc db:add {list chan method value modifby action limit reason} {
     dict set entries $id limit $limit
     dict set entries $id hits 0
     dict set entries $id depends ""
-    dict set entries $id reason [join [split $reason]]
+    dict set entries $id reason $reason; # -- already normalised above; verbatim, not list-parsed
     
     # -- track the ids of cumulative patterns
     if {$limit ne "1:1:1" && $limit ne ""} { set flud:id($chan,$method,$value) $id };
@@ -2342,57 +2435,104 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- IPv4 and IPv6 support for CIDR match
-proc cidr:match {ip cidr} {
-    if {![regexp -- {([^/]+)/(\d+)$} $cidr -> net prefix]} { return 0; }; # not CIDR notation
-    
-    set ipIsV6 [expr {[string first ":" $ip] != -1}]
-    set netIsV6 [expr {[string first ":" $net] != -1}]
 
-    if {$ipIsV6 != $netIsV6} { return 0 } ;# IP version mismatch
+# -- expand an IPv6 address to a list of 8 four-digit hex groups; "" if invalid
+# -- shared by ipv6_to_binary (CIDR matching) and ip:reverse (DNSBL/geo lookups)
+proc ipv6:expand {addr} {
+    # -- only one "::" is legal
+    if {[regexp -all -- {::} $addr] > 1} { return "" }
 
-    if {$ipIsV6} {
-        # IPv6 Logic
-        if {$prefix > 128} { return 0 }
-        set ipBin [ipv6_to_binary $ip]
-        set netBin [ipv6_to_binary $net]
+    # -- split into the halves either side of "::"
+    if {[string first "::" $addr] != -1} {
+        set idx [string first "::" $addr]
+        set head [string range $addr 0 [expr {$idx - 1}]]
+        set tail [string range $addr [expr {$idx + 2}] end]
+        set hgroups [expr {$head eq "" ? [list] : [split $head ":"]}]
+        set tgroups [expr {$tail eq "" ? [list] : [split $tail ":"]}]
+        set compressed 1
     } else {
-        # IPv4 Logic
-        if {$prefix > 32} { return 0 }
-        binary scan [binary format c4 [split $ip .]] B32 ipBin
-        binary scan [binary format c4 [split $net .]] B32 netBin
+        set hgroups [split $addr ":"]
+        set tgroups [list]
+        set compressed 0
     }
-    
-    if {$ipBin eq "" || $netBin eq ""} { return 0 } ;# Conversion failed
-    
-    return [expr {[string range $ipBin 0 [expr {$prefix - 1}]] eq [string range $netBin 0 [expr {$prefix - 1}]]}]
+
+    # -- expand a trailing IPv4-mapped form (e.g. ::ffff:192.168.1.1)
+    set last [lindex [concat $hgroups $tgroups] end]
+    if {$last ne "" && [string first "." $last] != -1} {
+        if {![regexp -- {^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} $last -> a b c d]} { return "" }
+        foreach o [list $a $b $c $d] { if {$o > 255} { return "" } }
+        set v4 [list [format %04x [expr {($a << 8) | $b}]] [format %04x [expr {($c << 8) | $d}]]]
+        if {[llength $tgroups]} {
+            set tgroups [concat [lrange $tgroups 0 end-1] $v4]
+        } else {
+            set hgroups [concat [lrange $hgroups 0 end-1] $v4]
+        }
+    }
+
+    # -- how many zero groups does "::" stand in for?
+    set have [expr {[llength $hgroups] + [llength $tgroups]}]
+    if {$compressed} {
+        set fill [expr {8 - $have}]
+        if {$fill < 1} { return "" }
+    } else {
+        if {$have != 8} { return "" }
+        set fill 0
+    }
+
+    set groups $hgroups
+    for {set i 0} {$i < $fill} {incr i} { lappend groups 0000 }
+    set groups [concat $groups $tgroups]
+
+    # -- normalise each group to 4 hex digits, validating as we go
+    set out {}
+    foreach g $groups {
+        if {![regexp -- {^[0-9a-fA-F]{1,4}$} $g]} { return "" }
+        lappend out [format %04x [::scan $g %x]]
+    }
+    if {[llength $out] != 8} { return "" }
+    return $out
 }
 
-# FINAL CORRECTED VERSION
-proc ipv6_to_binary {ipv6_addr} {
-    set expanded_addr $ipv6_addr
-    # Check for and expand "::" notation
-    if {[string first "::" $expanded_addr] != -1} {
-        set num_colons [expr {[string length [regsub -all {[^:]} $expanded_addr ""]]}]
-        set num_to_add [expr {7 - $num_colons}]
-        set replacement_str ":"
-        for {set i 0} {$i < $num_to_add} {incr i} {
-            append replacement_str "0:"
-        }
-        set expanded_addr [regsub -- "::" $expanded_addr $replacement_str]
-        # Handle edge cases like :: at the beginning or end
-        if {[string index $expanded_addr 0] eq ":"} { set expanded_addr "0$expanded_addr" }
-        if {[string index $expanded_addr end] eq ":"} { set expanded_addr "${expanded_addr}0" }
+# -- convert an IPv6 address to a 128-bit binary string; returns "" if invalid
+proc ipv6_to_binary {addr} {
+    set groups [ipv6:expand $addr]
+    if {$groups eq ""} { return "" }
+    set bits ""
+    foreach g $groups { append bits [format %016b [::scan $g %x]] }
+    return $bits
+}
+
+# -- convert an IPv4 address to a 32-bit binary string; returns "" if invalid
+proc ipv4_to_binary {addr} {
+    if {![regexp -- {^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} $addr -> a b c d]} { return "" }
+    foreach o [list $a $b $c $d] { if {$o > 255} { return "" } }
+    binary scan [binary format c4 [list $a $b $c $d]] B32 bits
+    return $bits
+}
+
+# -- does $ip fall inside $cidr?
+proc cidr:match {ip cidr} {
+    if {![regexp -- {^([^/]+)/(\d+)$} $cidr -> net prefix]} { return 0 }; # not CIDR notation
+
+    set ipIsV6  [expr {[string first ":" $ip]  != -1}]
+    set netIsV6 [expr {[string first ":" $net] != -1}]
+
+    if {$ipIsV6 != $netIsV6} { return 0 };# IP version mismatch
+
+    if {$ipIsV6} {
+        if {$prefix > 128} { return 0 }
+        set ipBin  [ipv6_to_binary $ip]
+        set netBin [ipv6_to_binary $net]
+    } else {
+        if {$prefix > 32} { return 0 }
+        set ipBin  [ipv4_to_binary $ip]
+        set netBin [ipv4_to_binary $net]
     }
 
-    # Build the final 128-bit binary string
-    set binary_str ""
-    foreach group [split $expanded_addr ":"] {
-        if {$group eq ""} { set group "0" }
-        set decimal "0x$group"
-        set bin [format %016b $decimal]
-        append binary_str $bin
-    }
-    return $binary_str
+    if {$ipBin eq "" || $netBin eq ""} { return 0 };# conversion failed or invalid input
+    if {$prefix == 0} { return 1 };# /0 matches everything in the same family
+
+    return [expr {[string range $ipBin 0 [expr {$prefix - 1}]] eq [string range $netBin 0 [expr {$prefix - 1}]]}]
 }
 
 putlog "\[@\] Armour: loaded CIDR matching procedure."
@@ -2423,57 +2563,41 @@ proc geo:ip2data {ip} {
     # -- asynchronous lookup via coroutine
     set answer [dns:lookup $revip.$domain TXT]
     
-    # -- example:
-    # 7545 | 123.243.188.0/22 | AU | apnic | 2007-02-14
-    
-    if {$answer eq ""} { return; }
-    set string [split $answer " | "]
-    # 7545 {} {} 123.243.188.0/22 {} {} AU {} {} apnic {} {} 2007-02-14
-    set asn [lindex $string 0]
-    set subnet [lindex $string 3]
-    set country [lindex $string 6]
-    set rir [lindex $string 9]
-    set date [lindex $string 12]
+    if {$answer eq ""} { return "" }
+
+    # -- example: 7545 | 123.243.188.0/22 | AU | apnic | 2007-02-14
+    # -- note the first field may list several origin ASNs: "7545 1221 | ..."
+    # -- split on the pipe only; splitting on " | " treats it as a character set
+    set fields {}
+    foreach f [split $answer "|"] { lappend fields [string trim $f] }
+    if {[llength $fields] < 5} {
+        debug 1 "\002geo:ip2data\002: unexpected response for $ip: $answer"
+        return ""
+    }
+    lassign $fields asnlist subnet country rir date
+    set asn [lindex $asnlist 0]; # -- first origin ASN where several are announced
+
     debug 3 "\002geo:ip2data\002: IP: $ip -- ASN: $asn -- subnet: $subnet -- country: $country -- rir: $rir -- date: $date"
-    return "$asn $country $subnet $rir $date"
+    return [list $asn $country $subnet $rir $date]
 }
 
 # -- reverse an IPv4 or IPv6 IP address
 proc ip:reverse {ip} {
-    set reversed_ip ""
-    # -- check if IPv4 or IPv6
-    if {[regexp {^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$} $ip]} {
-        # -- IPv4 address
-        set ip_segments [split $ip "."]
-        set reversed_ip [join [lreverse $ip_segments] "."]
-        
-    } elseif {[regexp {^(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$} $ip]} {
-        # -- IPv6 address
-        set ip_segments [split $ip ":"]
-        set num_segments [llength $ip_segments]
-
-        # -- fill in missing zeros for :: notation
-        set index [lsearch -exact $ip_segments ""]
-        if {$index != -1} {
-            set num_missing_segments [expr 8 - $num_segments]
-            set ip_segments [lreplace $ip_segments $index $index {*}[lrepeat $num_missing_segments "0000"]]
-        }
-
-        # -- expand each segment to 4 characters and reverse
-        set expanded_ip_segments {}
-        foreach segment $ip_segments {
-            set expanded_segment [format %04s $segment]
-            lappend expanded_ip_segments [split $expanded_segment ""]
-        }
-
-        # -- interleave segments with "."
-        set reversed_ip [join [lreverse [concat {*}$expanded_ip_segments]] "."]
-    } else {
-        # -- invalid IP address
-        return;
+    # -- IPv4: reverse the octets
+    if {[regexp -- {^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} $ip -> a b c d]} {
+        foreach o [list $a $b $c $d] { if {$o > 255} { return "" } }
+        return [join [list $d $c $b $a] "."]
     }
-    if {$reversed_ip eq ""} { return; }; # -- safety net
-    return $reversed_ip
+
+    # -- IPv6: expand to 8 groups, then reverse the 32 nibbles
+    if {[string first ":" $ip] != -1} {
+        set groups [ipv6:expand $ip]
+        if {$groups eq ""} { return "" }
+        return [join [lreverse [split [join $groups ""] ""]] "."]
+    }
+
+    # -- invalid IP address
+    return ""
 }
 
 putlog "\[@\] Armour: loaded geolocation tools."
@@ -2705,13 +2829,13 @@ proc auth:attempt {} {
     set thepass [cfg:get auth:pass *]
 
     if {[cfg:get auth:totp *] ne "" && [cfg:get auth:mech] eq "gnuworld" && [cfg:get ircd] eq "1"} {
-        #set thetoken [onetimepass::get_totp [cfg:get auth:totp *]]
-        set oathtool [lindex [exec whereis oathtool] 1]
-        if {$oathtool eq ""} {
-            debug 0 "\[@\] Armour: \002(error)\002 oathtool not found, cannot generate TOTP token. \002Try:\002 sudo $pkgManager $pkg_oathtool"
+        # -- generate in-tree: no external process, and the secret never appears on a command line
+        set key [totp:secret [cfg:get auth:totp *]]
+        if {$key eq ""} {
+            debug 0 "\[@\] Armour: \002(error)\002 auth:totp is not a valid base32 secret, cannot generate TOTP token"
             return;
         }
-        set thetoken [exec $oathtool --totp [cfg:get auth:totp *]]
+        set thetoken [onetimepass::get_totp $key]
         append thepass " $thetoken"
     }
     
@@ -3850,6 +3974,49 @@ proc chanlist:hit {chan nick uhost chanlist} {
 set ::optimize-kicks 0
 
 # -- kickban handler
+# -- timed server bans are unbanned by an eggdrop timer, and timers do not survive a restart or
+# -- rehash: the ban (and any (auto) blacklist entry mode:rem:b would have removed with it) then
+# -- stays forever.  these three keep a record so the schedule survives.
+
+# -- record a timed ban, due to be lifted $mins minutes from now
+proc ban:remember {chan mask mins} {
+    if {$mins <= 0} { return }
+    set expire [expr {[clock seconds] + ($mins * 60)}]
+    set dbchan [db:escape $chan]; set dbmask [db:escape $mask]
+    db:query "DELETE FROM tempbans WHERE chan='$dbchan' AND mask='$dbmask'"
+    db:query "INSERT INTO tempbans (chan,mask,expire) VALUES ('$dbchan','$dbmask','$expire')"
+    debug 3 "\002ban:remember:\002 $mask on $chan expires in $mins min"
+}
+
+# -- forget a ban that has been lifted
+proc ban:forget {chan mask} {
+    db:query "DELETE FROM tempbans WHERE chan='[db:escape $chan]' AND mask='[db:escape $mask]'"
+}
+
+# -- re-arm (or action) the timed bans recorded before the last restart
+proc ban:restore {} {
+    set now [clock seconds]
+    set due 0; set armed 0
+    foreach row [db:query "SELECT chan,mask,expire FROM tempbans"] {
+        lassign $row chan mask expire
+        if {$chan eq "" || $mask eq ""} { continue }
+        if {$expire <= $now} {
+            # -- already due: lift it now
+            incr due
+            catch { mode:unban $chan [list $mask] }
+            ban:forget $chan $mask
+        } else {
+            # -- still pending: re-arm for the remaining time (timer takes whole minutes)
+            set mins [expr {($expire - $now + 59) / 60}]
+            incr armed
+            catch { timer $mins "arm::mode:unban $chan [list $mask]" }
+        }
+    }
+    if {$due || $armed} {
+        debug 0 "\002ban:restore:\002 restored timed bans -- lifted $due expired, re-armed $armed"
+    }
+}
+
 proc kickban {nick ident host chan duration reason {id ""}} {
     variable cfg
     variable data:chanban;   # -- state: tracks recently banned masks for a channel (by 'chan,mask')
@@ -3954,20 +4121,27 @@ proc kickban {nick ident host chan duration reason {id ""}} {
             # -- unit is hours
             set time [expr $time * 60]
             timer $time "arm::mode:unban $chan $mask"
+            set bmins $time
         } elseif {$unit eq "s"} {
             # -- unit is secs
             utimer $time "arm::mode:unban $chan $mask"
+            set bmins [expr {($time + 59) / 60}]
         } elseif {$unit eq "m"} {
             # -- unit is mins
             timer $time "arm::mode:unban $chan $mask"
+            set bmins $time
         } elseif {$unit eq "d"} {
             # -- unit is days
             set time [expr $time * 1440]
             timer $time "arm::mode:unban $chan $mask"
+            set bmins $time
         } else {
             # -- just use mins
             timer $time "arm::mode:unban $chan $mask"
-        }        
+            set bmins $time
+        }
+        # -- remember it, so the unban still happens if the bot restarts before the timer fires
+        catch { ban:remember $chan $mask $bmins }
     } elseif {[cfg:get chan:method $chan] in "2 3"} {
         # -- X ban
         # -- TODO: support non-gnuworld services
@@ -4152,6 +4326,56 @@ proc arm:conftest {var} {
 #        conf <setting> [value]
 #        conf <setting> -out
 #        conf <setting> -desc
+# -- config settings whose values are secrets: never echoed over IRC, never listed by a mask.
+# -- the explicit list covers today's settings; the suffix rule covers keys added later.
+proc conf:sensitive {var} {
+    if {$var in {auth:pass auth:totp ask:token ask:org dronebl:key humour:key ipqs:key ircbl:key
+                 ninjas:key speak:key weather:key}} { return 1 }
+    return [regexp -- {:(key|pass|password|token|secret|totp)$} $var]
+}
+
+# -- render a value as a Tcl literal for a 'set cfg(...)' line.  the config file is Tcl source, so
+# -- a value written inside "..." that contains " [ $ or \ would run code the next time the bot
+# -- starts.  plain values keep the familiar "..." form; anything else is quoted with [list].
+proc conf:literal {value} {
+    if {[regexp -- {^\d+$} $value]} { return $value }
+    if {$value eq ""} { return {""} }
+    if {![regexp -- {["\\$\[\]{};]} $value]} { return "\"$value\"" }
+    return [list $value]
+}
+
+# -- replace every line of $path beginning with $prefix by $newline, in Tcl rather than sed: nothing
+# -- in $newline is interpreted.  the file is written to a temporary copy with the same permissions
+# -- and renamed over the original, so an interrupted write cannot truncate it.
+# -- returns the number of lines replaced (the file is left untouched when that is 0).
+proc file:setline {path prefix newline} {
+    set enc [encoding system]
+    set fh [open $path r]; fconfigure $fh -translation lf -encoding $enc; set data [read $fh]; close $fh
+    set trailing [expr {[string index $data end] eq "\n"}]
+    if {$trailing} { set data [string range $data 0 end-1] }
+    set out [list]; set n 0; set plen [string length $prefix]
+    foreach line [split $data \n] {
+        if {[string equal -length $plen $prefix $line]} { lappend out $newline; incr n } else { lappend out $line }
+    }
+    if {$n == 0} { return 0 }
+    set tmp "$path.tmp[pid]"
+    set fh [open $tmp w]; fconfigure $fh -translation lf -encoding $enc
+    puts -nonewline $fh [join $out \n]
+    if {$trailing} { puts -nonewline $fh \n }
+    close $fh
+    catch { file attributes $tmp -permissions [file attributes $path -permissions] }
+    file rename -force $tmp $path
+    return $n
+}
+
+# -- does $path contain a line beginning with $prefix?
+proc file:hasline {path prefix} {
+    set fh [open $path r]; set data [read $fh]; close $fh
+    set plen [string length $prefix]
+    foreach line [split $data \n] { if {[string equal -length $plen $prefix $line]} { return 1 } }
+    return 0
+}
+
 proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg
@@ -4163,37 +4387,34 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
     # -- end default proc template
     
     if {$arg eq ""} { reply $stype $starget "usage: conf ?chan? <setting|mask> \[value|-out|-desc\]"; return; }
-    set chan [lindex $arg 0]
+    set chan [arg:word $arg 0]
     if {[string index $chan 0] ne "#" && $chan ne "*"} { 
         # -- default to global if not given
         set chan "*" 
-        set rest [lrange $arg 0 end]
+        set rest [arg:tail $arg 0]
     } else {
-        set rest [lrange $arg 1 end]
+        set rest [arg:tail $arg 1]
     }
+    set words [regexp -all -inline {\S+} $rest];  # -- never list-parse user text
     set cid [db:get id channels chan $chan]
     if {$cid eq ""} { reply $type $target "\002error:\002 channel $chan is not registered."; return; }
     
-    set var [join $rest :]
-    set length [llength $rest]; set out 0; set desc 0; set change 0
+    set var [join $words :]
+    set length [llength $words]; set out 0; set desc 0; set change 0
     
     if {$length eq "1"} {
-        if {[string match "*:*" $rest]} {
-            # -- var is colon notation
-            set var [join [lrange $arg 1 end]]
-        }
-        set var $rest
+        set var [lindex $words 0]
     } else {
-        if {[lindex $rest [expr $length - 1]] eq "-out"} {
-            set var [join [lrange $rest 0 [expr $length - 2]] :]
+        if {[lindex $words end] eq "-out"} {
+            set var [join [lrange $words 0 end-1] :]
             set out 1;
-        } elseif {[lindex $rest [expr $length - 1]] eq "-desc"} {
-            set var [join [lrange $rest 0 [expr $length - 2]] :]
+        } elseif {[lindex $words end] eq "-desc"} {
+            set var [join [lrange $words 0 end-1] :]
             set desc 1;
         } elseif {$rest ne ""} {
             # -- change setting value
             set change 1
-            set var [lindex $rest 0]
+            set var [lindex $words 0]
 
             # -- check for special values
             if {$var in "info"} {
@@ -4201,35 +4422,34 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
                 return;
             }
 
-            set newval [join [lrange $rest 1 end]]
+            set newval [arg:tail $rest 1];  # -- verbatim
+            if {$newval eq "\"\""} { set newval "" };  # -- "" means: set to empty
             if {![info exists cfg($var)]} {
                 reply $type $target "no such setting found." 
                 return;
             }
             set curval [cfg:get $var $chan]
             if {$newval eq $curval} {
+                if {[conf:sensitive $var] && $type ne "dcc"} { set curval "(hidden)" }
                 reply $type $target "\002info:\002 value for \002$var\002 is already: $curval" 
                 return;
             }
             # -- update the value
-            set os [exec uname]
-            if {[regexp -- {^\d+$} $newval] || $newval eq "\"\""} {
-                # -- number
-                set newset "set cfg($var) $newval"
-            } else {
-                # -- string
-                set newset "set cfg($var) \"$newval\""
-            }
-            if {$os in "FreeBSD OpenBSD NetBSD macOS"} {
-                # -- non-GNU sed
-                exec sed -i '' "s|^set cfg($var) .*$|$newset|" "./armour/[cfg:get botname].conf"
-            } else {
-                # -- GNU sed
-                exec sed -i "s|^set cfg($var) .*$|$newset|" "./armour/[cfg:get botname].conf"
+            # -- SECURITY: this used to build a sed command from the value; a value containing
+            # -- "|" could end the substitution and add sed's "e" command, running a shell command.
+            # -- the line is now replaced in Tcl, and written as a properly quoted Tcl literal so the
+            # -- value cannot run code when the config file is sourced on the next start.
+            set newset "set cfg($var) [conf:literal $newval]"
+            set conffile "./armour/[cfg:get botname].conf"
+            if {[catch {file:setline $conffile "set cfg($var) " $newset} n]} {
+                reply $type $target "\002error:\002 could not update $conffile: $n"
+                return
             }
             set cfg($var) $newval
-            debug 0 "\002cmd:conf:\002 updated config setting \002$var\002 to: \002$newval\002"
-            reply $type $target "done. updated setting \002$var\002 to: \002$newval\002"
+            set shown [expr {[conf:sensitive $var] && $type ne "dcc" ? "(hidden)" : $newval}]
+            set note [expr {$n == 0 ? " (not found in the config file -- applies until restart)" : ""}]
+            debug 0 "\002cmd:conf:\002 updated config setting \002$var\002 to: \002[expr {[conf:sensitive $var] ? "(hidden)" : $newval}]\002$note"
+            reply $type $target "done. updated setting \002$var\002 to: \002$shown\002$note"
             return;
         }
     }
@@ -4237,16 +4457,22 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
     # -- check for special values
     if {$var in "info"} {
         reply $type $target "[cfg:get $var *]"
-        #log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+        #log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
         return;
     }
         
     # -- check the var
     set count 0;
-    if {[cfg:get $var $chan] ne ""} {
+    # -- exact match if the setting exists (even when its value is empty, e.g. auth:pass=""),
+    # -- otherwise treat $var as a mask.  using [info exists] rather than [cfg:get] here avoids
+    # -- cfg:get raising a "config error" for a mask like *auth* and correctly routes empty-valued
+    # -- settings to the exact branch.
+    if {[info exists cfg($var)]} {
         if {!$desc} {
             # -- don't show config var description 
-            reply $type $target "\002setting:\002 cfg($var) -- \002value:\002 [cfg:get $var $chan]"
+            # -- secrets are only shown over DCC; the protected list used to apply to masks only
+            set shown [expr {[conf:sensitive $var] && $type ne "dcc" ? "(hidden)" : [cfg:get $var $chan]}]
+            reply $type $target "\002setting:\002 cfg($var) -- \002value:\002 $shown"
         } else {
             # -- show description of config setting
             set lines [arm:conftest $var]
@@ -4265,19 +4491,8 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
         set thelist ""
         foreach i [array names cfg] {
             set long [split $i :]
-            # -- protect some sensitive vars
-            switch -- $i {
-                auth:pass   { continue; }
-                auth:totp   { continue; }
-                ipqs:key    { continue; }
-                ircbl:key   { continue; }
-                ask:token   { continue; }
-                ask:org     { continue; }
-                speak:key   { continue; }
-                humour:key  { continue; }
-                ninjas:key  { continue; }
-                weather:key { continue; }
-            }
+            # -- protect sensitive vars (dronebl:key was missing from the old hand-written list)
+            if {[conf:sensitive $i]} { continue; }
             if {[string match $var $i] || [string match $var $long]} { lappend thelist $i }
         }
         if {$thelist ne ""} {
@@ -4304,7 +4519,7 @@ proc arm:cmd:conf {0 1 2 3 {4 ""} {5 ""}} {
     } elseif {$count > 1} {
         reply $type $target "done. $count results found."
     }
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: cmds
@@ -4381,7 +4596,7 @@ proc arm:cmd:cmds {0 1 2 3 {4 ""} {5 ""}} {
         }
         if {$hint eq 1} { reply $ntype $ntarget "\002hint:\002 for web documentation, see: \002https://armour.bot/cmd\002" }
         # -- create log entry for command use
-        log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+        log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
         return;
     }
 
@@ -4409,7 +4624,7 @@ proc arm:cmd:cmds {0 1 2 3 {4 ""} {5 ""}} {
     if {$hint eq 1} { reply $stype $starget "\002hint:\002 for web documentation, see: \002https://armour.bot/cmd\002" }
 
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
     
     return; 
 }
@@ -4503,7 +4718,7 @@ proc arm:cmd:help {0 1 2 3 {4 ""} {5 ""}} {
         close $fd
         if {$hint eq 1} { reply $stype $starget "\002hint:\002 for web documentation, see: \002https://armour.bot/cmd/$command\002" }
         # -- create log entry for command use
-        log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+        log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
     }
 }
 
@@ -4547,7 +4762,7 @@ proc arm:cmd:op {0 1 2 3 {4 ""} {5 ""}} {
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     # -- end default proc template
     
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     if {![onchan $botnick $chan]} { reply $type $target "sorry! unable to op when not in a channel."; return; }
     if {![botisop $chan] && [cfg:get chan:method $chan] in "1 2"} { 
@@ -4612,7 +4827,7 @@ proc arm:cmd:deop {0 1 2 3 {4 ""} {5 ""}} {
         set deoplist [lrange $arg 0 end]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     # -- end default proc template
     
     if {![onchan $botnick $chan]} { reply $type $target "sorry! unable to deop when not in a channel."; return; }
@@ -4663,7 +4878,7 @@ proc arm:cmd:voice {0 1 2 3 {4 ""} {5 ""}} {
         set voicelist [lrange $arg 0 end]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
 
     if {![onchan $botnick $chan]} { reply $type $target "sorry! unable to voice when not in a channel."; return; }
     if {![botisop $chan] && [cfg:get chan:method $chan] in "1 2"} {
@@ -4724,7 +4939,7 @@ proc arm:cmd:devoice {0 1 2 3 {4 ""} {5 ""}} {
         set devoicelist [lrange $arg 0 end]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     if {![onchan $botnick $chan]} { reply $type $target "sorry! unable to devoice when not in a channel."; return; }
     if {![botisop $chan] && [cfg:get chan:method $chan] in "1 2"} {
@@ -4787,7 +5002,7 @@ proc arm:cmd:invite {0 1 2 3 {4 ""} {5 ""}} {
     if {![userdb:isAllowed $nick $cmd $chan $type]} { 
         if {$glevel < 500} { return; } else { set cid 1 }; # -- must be for unregistered chan
     }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     if {![botisop $chan]} { reply $type $target "sorry! unable to invite, not opped."; return; }
     if {![onchan $botnick $chan]} { reply $type $target "sorry! unable to invite when not in a channel."; return; }
@@ -4823,15 +5038,15 @@ proc arm:cmd:kick {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
 
     # -- check for channel
-    set first [lindex $arg 0]
+    set first [arg:word $arg 0]
     if {[string index $first 0] eq "#"} {
-        set chan $first; set kicklist [lindex $arg 1]; set reason [lrange $arg 2 end];
+        set chan $first; set kicklist [arg:word $arg 1]; set reason [arg:tail $arg 2];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set kicklist [lindex $arg 0]; set reason [lrange $arg 1 end]
+        set kicklist [arg:word $arg 0]; set reason [arg:tail $arg 1]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     set kicklist [split $kicklist ,]
     set length [llength $kicklist]
@@ -4882,23 +5097,23 @@ proc arm:cmd:ban {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
     
     # -- check for channel
-    set first [lindex $arg 0]
+    set first [arg:word $arg 0]
     if {[string index $first 0] == "#"} { 
-        set chan $first; set banlist [lindex $arg 1]; set rest [lrange $arg 2 end];
+        set chan $first; set banlist [arg:word $arg 1]; set rest [arg:tail $arg 2];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set banlist [lindex $arg 0]; set rest [lrange $arg 1 end]
+        set banlist [arg:word $arg 0]; set rest [arg:tail $arg 1]
     }
 
-    if {[string is digit [lindex $rest 0]] || [regexp -- {^(\d+)([hmsd])$} [lindex $rest 0] time unit]} {
-        set duration [lindex $rest 0]
-        set reason [lrange $rest 1 end]
+    if {[string is digit [arg:word $rest 0]] || [regexp -- {^(\d+)([hmsd])$} [arg:word $rest 0] time unit]} {
+        set duration [arg:word $rest 0]
+        set reason [arg:tail $rest 1]
     } else {
          set duration [cfg:get ban:time $chan]; set reason $rest
     }
 
     if {![userdb:isAllowed $nick $cmd $chan $type] && !$unet} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
         
     set banlist [split $banlist ,]
     set length [llength $banlist]
@@ -5006,7 +5221,7 @@ proc arm:cmd:unban {0 1 2 3 {4 ""} {5 ""}} {
         set unbanlist [lindex $arg 0]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     set ublist $unbanlist; set unbanlist [split $unbanlist ,]
     set length [llength $unbanlist]
@@ -5059,7 +5274,7 @@ proc arm:cmd:unban {0 1 2 3 {4 ""} {5 ""}} {
 
     # -- create log entry for command use
     set cid [db:get id channels chan $chan]
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -5074,15 +5289,15 @@ proc arm:cmd:topic {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
     
     # -- check for channel
-    set first [lindex $arg 0]
+    set first [arg:word $arg 0]
     if {[string index $first 0] eq "#"} {
-        set chan $first; set topic [lrange $arg 1 end];
+        set chan $first; set topic [arg:tail $arg 1];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set topic [lrange $arg 0 end]
+        set topic [arg:tail $arg 0]
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
      
     if {![onchan $botnick $chan]} { reply $type $target "sorry! unable to set topics when not in a channel."; return; }
     if {![botisop $chan] && [cfg:get chan:method $chan] in "1 2"} {
@@ -5125,17 +5340,17 @@ proc arm:cmd:black {0 1 2 3 {4 ""} {5 ""}} {
     
     # -- check for channel
     if {[string index [lindex $arg 0] 0] eq "#" || [lindex $arg 0] eq "*"} {
-        set chan [lindex $arg 0]; set tnick [lindex $arg 1];
-        set reason [lrange $arg 2 end];
+        set chan [arg:word $arg 0]; set tnick [arg:word $arg 1];
+        set reason [arg:tail $arg 2];
     } else {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
-        set tnick [lindex $arg 0]; set reason [lrange $arg 1 end]
+        set tnick [arg:word $arg 0]; set reason [arg:tail $arg 1]
     }
     set ltnick [string tolower $tnick]
     set stnick [split $tnick]
 
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set lchan [string tolower $chan]
     
     if {$tnick eq ""} { reply $stype $starget "\002usage:\002 black ?chan? <nick> \[reason\]"; return; }
@@ -5205,7 +5420,7 @@ proc arm:cmd:asn {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
     
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set lchan [string tolower $chan]
     
     set ip [lindex $arg 0]
@@ -5270,7 +5485,7 @@ proc arm:cmd:chanscan {0 1 2 3 {4 ""} {5 ""}} {
         set chan [userdb:get:chan $user $chan]; # -- predict chan when not given
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set lchan [string tolower $chan];  # -- make safe for arrays
     #if {$chan eq ""} { reply $stype $starget "\002usage:\002 chanscan <chan>"; return; }
     
@@ -5339,7 +5554,7 @@ proc arm:cmd:mode {0 1 2 3 {4 ""} {5 ""}} {
     }
     set lchan [string tolower $chan]
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     set id [get:val chan:id $chan]; set cid $id
     if {$type ne "pub"} { set xtra " on $chan" } else { set xtra "" }
@@ -5377,7 +5592,7 @@ proc arm:cmd:mode {0 1 2 3 {4 ""} {5 ""}} {
     db:close
     set chan:modeid($id) $mode;       # -- mode by chanid; TODO: deprecated?
     set chan:mode($lchan) $mode;      # -- mode by chan;   TODO: deprecated?
-    dict set dbchans $id mode $mode;  # -- dict: channel mode
+    if {$id ne "" && [dict exists $dbchans $id]} { dict set dbchans $id mode $mode }; # -- dict: channel mode
     
     # -- flush any existing trackers (safety net)
     set leavelist [get:val scan:list leave,$lchan]
@@ -5475,7 +5690,7 @@ proc arm:cmd:country {0 1 2 3 {4 ""} {5 ""}} {
     
     # -- ensure user has required access for command
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set lchan [string tolower $chan]
     
     set ip [lindex $arg 0]
@@ -5512,7 +5727,7 @@ proc arm:cmd:country {0 1 2 3 {4 ""} {5 ""}} {
     reply $type $target "\002(\002country\002)\002 for $ip is $country \002(desc:\002 $desc -- \002asn:\002 $asn -- \002prefix:\002 $prefix -- \002registry:\002 $rir -- \002info:\002 https://bgp.he.net/AS${asn}\002)\002"
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
     return;
 }
 
@@ -5559,7 +5774,7 @@ proc arm:cmd:scanrbl {0 1 2 3 {4 ""} {5 ""}} {
         reply $type $target "\002(\002dnsbl\002)\002 $dnsbl \002desc:\002 $desc \002(ip:\002 $dst -- \002score:\002 $score\002)\002"
     }
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: scanport
@@ -5597,7 +5812,7 @@ proc arm:cmd:scanports {0 1 2 3 {4 ""} {5 ""}} {
     reply $type $target "\002(\002open ports\002)\002 -> $openports"
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: exempt
@@ -5618,7 +5833,7 @@ proc arm:cmd:exempt {0 1 2 3 {4 ""} {5 ""}} {
         lassign $arg exempt mins
     }
     if {![userdb:isAllowed $nick $cmd $chan $type] && ![isop $nick $chan]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     # -- command: exempt
     
     if {$exempt eq ""} { reply $stype $starget "\002usage:\002 exempt ?chan? <nick> \[mins\]"; return; }
@@ -5855,7 +6070,7 @@ proc arm:cmd:scan {0 1 2 3 {4 ""} {5 ""}} {
         reply $type $target "scan complete (results: $mcount -- runtime: $runtime)"
     }
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" "" 
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" "" 
 }
 
 # -- command: search
@@ -5874,7 +6089,7 @@ proc arm:cmd:search {0 1 2 3 {4 ""} {5 ""}} {
 
     # -- check for channel
     set first [lindex $arg 0]; set anychan 0;
-    if {([string index $first 0] eq "#" && [string match "\*" $first] ne 1) || $first eq "*" || [string index $first 0] eq "?"} {
+    if {[string index $first 0] eq "#" || $first eq "*" || [string index $first 0] eq "?"} {
         # -- '*' denotes global entries
         # -- '?' denotes any entry channel
         if {[string index $first 0] eq "?"} { set anychan 1 }
@@ -5887,7 +6102,7 @@ proc arm:cmd:search {0 1 2 3 {4 ""} {5 ""}} {
     # -- ensure user has required access for command
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
 
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     # -- end default proc template
     
@@ -5980,7 +6195,7 @@ proc arm:cmd:search {0 1 2 3 {4 ""} {5 ""}} {
     # -- create log entry for command use
     if {$chan eq "?"} { set chan "*"}
     set cid [db:get id channels chan $chan]
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -6017,7 +6232,7 @@ proc arm:cmd:load {0 1 2 3 {4 ""} {5 ""}} {
     reply $type $target "loaded \002$wcount\002 whitelist, \002$bcount\002 blacklist, and \002$ucount\002 user entries to memory"
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- cmd: rehash
@@ -6039,7 +6254,7 @@ proc arm:cmd:rehash {0 1 2 3 {4 ""} {5 ""}} {
     reply $type $target "done." 
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -6067,7 +6282,7 @@ proc arm:cmd:restart {0 1 2 3 {4 ""} {5 ""}} {
     restart
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- cmd: restart
@@ -6093,7 +6308,7 @@ proc arm:cmd:die {0 1 2 3 {4 ""} {5 ""}} {
     putnow "QUIT :shutdown: $reason"
 
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
     
     # -- kill bot
     die $reason
@@ -6108,13 +6323,13 @@ proc arm:cmd:say {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
     set chan [userdb:get:chan $user $chan]
 
-    set dest [lindex $arg 0]
-    set string [join [lrange $arg 1 end]]
+    set dest [arg:word $arg 0]
+    set string [arg:tail $arg 1]
     
     set action 0; set idx 0
     if {$dest eq "-a"} {
         # -- action (/me)
-        set action 1; set dest [lindex $arg 1]; set idx 1
+        set action 1; set dest [arg:word $arg 1]; set idx 1
         if {$dest eq ""} { reply $stype $starget "\002usage:\002 say -a <chan|*> <string>"; return;  }
     }
 
@@ -6140,11 +6355,10 @@ proc arm:cmd:say {0 1 2 3 {4 ""} {5 ""}} {
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     set msglist [join $msglist ,]
-    if {$action} { set string "\001ACTION [lrange $arg $idx end]\002" } else { set string [lrange $arg $idx end] }
-    set string [join $string]
+    if {$action} { set string "\001ACTION [arg:tail $arg $idx]\001" } else { set string [arg:tail $arg $idx] }
     if {$msglist eq "" || $string eq ""} { reply $stype $starget "\002usage:\002 say \[-a\] <chan|*> <string>"; return;  }
     
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     # -- send the message
     putquick "PRIVMSG $msglist :$string"
@@ -6195,7 +6409,7 @@ proc arm:cmd:jump {0 1 2 3 {4 ""} {5 ""}} {
     }
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -6240,7 +6454,7 @@ proc arm:cmd:version {0 1 2 3 {4 ""} {5 ""}} {
             -- \002github:\002 unavailable"       
     }
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: idle
@@ -6264,7 +6478,7 @@ proc arm:cmd:idle {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     debug 1 "arm:cmd:idle: idle check (user: $user -- uid: $uid -- chan: $chan)"
     
@@ -6279,7 +6493,7 @@ proc arm:cmd:idle {0 1 2 3 {4 ""} {5 ""}} {
     
     # -- create log entry for command use
     set cid [db:get id channels chan $chan]
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -6424,7 +6638,7 @@ proc arm:cmd:stats {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # -- create log entry for command use
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -6460,7 +6674,7 @@ proc arm:cmd:status {0 1 2 3 {4 ""} {5 ""}} {
     }
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -6488,7 +6702,7 @@ proc arm:cmd:view {0 1 2 3 {4 ""} {5 ""}} {
         set chan [userdb:get:chan $user $chan]; # -- find a logical chan
     }
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }    
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     # -- check if ID(s) provided
     if {[regexp -- {^\d+(?:,\d+)*$} $ids] && $ids ne ""} {
@@ -6564,6 +6778,113 @@ proc arm:cmd:view {0 1 2 3 {4 ""} {5 ""}} {
 # -- command: add
 # add a whitelist or blacklist entry
 # usage: add ?chan? <white|black> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? [reason]
+# -- does a white/black entry of $method/$value match the user $nick!$ident@$host (with account
+# -- $xuser and realname $rname)?  Mirrors the host/user/regex/chan tests in scan:match; used by
+# -- add to preview which current channel users a new entry would hit.  Returns 1/0.
+proc entry:matches {method value nick ident host {xuser 0} {rname ""}} {
+    switch -- $method {
+        host {
+            if {[string match -nocase $value $host]} { return 1 }
+            if {[string match -nocase $value "$ident@$host"]} { return 1 }
+            if {[string match -nocase $value "$nick!$ident@$host"]} { return 1 }
+            if {[string first "/" $value] != -1 && [cidr:match $host $value]} { return 1 }
+            return 0
+        }
+        user { return [expr {$xuser ne "0" && $xuser ne "" && [string match -nocase $value $xuser]}] }
+        regex {
+            if {[catch {regexp -- $value "$nick!$ident@$host/$rname"} m]} { return 0 }
+            return $m
+        }
+        default { return 0 }
+    }
+}
+
+# -- among the non-op, non-bot users currently on $chan, how many would a new entry hit?
+# -- returns a list: {count nick1 nick2 ...} (nicks capped for display by the caller)
+proc add:matchusers {chan method value} {
+    global botnick;  # -- eggdrop's own nick; there is no cfg(botnick) setting
+    set hits [list]
+    if {[catch {chanlist $chan} users]} { return {0} }
+    foreach n $users {
+        if {[string equal -nocase $n $botnick]} { continue }
+        set uh [getchanhost $n $chan]
+        if {$uh eq ""} { continue }
+        set ident [lindex [split $uh @] 0]
+        set host [lindex [split $uh @] 1]
+        set ln [string tolower $n]
+        set xuser 0; set rname ""
+        catch { set xuser [dict get $::arm::nickdata $ln account] }
+        catch { set rname [dict get $::arm::nickdata $ln rname] }
+        if {[entry:matches $method $value $n $ident $host $xuser $rname]} { lappend hits $n }
+    }
+    return [linsert $hits 0 [llength $hits]]
+}
+
+# -- existing entries of the OTHER list-type whose value overlaps a new $method/$value on $chan
+# -- (a white host that a black host also covers, or vice versa).  Advisory only.
+# -- returns a list of "id (type value)" strings, capped by the caller.
+proc add:conflicts {chan method value newtype} {
+    set out [list]
+    set other [expr {$newtype eq "white" ? "black" : "white"}]
+    catch {
+        dict for {id d} $::arm::entries {
+            if {[dict get $d type] ne $other} { continue }
+            if {[dict get $d method] ne $method} { continue }
+            set ec [dict get $d cid]
+            set ev [dict get $d value]
+            # -- overlap if either glob covers the other (string match is symmetric enough for a hint)
+            if {[string match -nocase $value $ev] || [string match -nocase $ev $value]} {
+                lappend out "$id ($other $ev)"
+            }
+        }
+    }
+    return $out
+}
+
+# -- which channels should add's advisory notes cover?  a channel-specific entry covers that one
+# -- channel; a global (*) entry applies on every channel the bot is on, so report them all.
+# -- falls back to the channel the command came from if the bot reports none.
+proc add:feedback:chans {chan starget {max 20}} {
+    if {$chan ne "*"} {
+        return [expr {[string index $chan 0] eq "#" ? [list $chan] : [list]}]
+    }
+    set out [list]
+    if {![catch {channels} chans]} {
+        foreach c $chans {
+            if {[string index $c 0] eq "#"} { lappend out $c }
+            if {[llength $out] >= $max} { break }
+        }
+    }
+    if {[llength $out] == 0} {
+        set c [lindex [split $starget] 0]
+        if {[string index $c 0] eq "#"} { lappend out $c }
+    }
+    return $out
+}
+
+# -- channel +b bans that would keep out a host covered by a new whitelist host entry $value.
+# -- a ban mask (nick!user@host glob) blocks the entry if the mask matches, or is matched by, the
+# -- whitelisted host in any of the host / *@host / *!*@host forms.  advisory; returns a list of masks.
+proc add:blockingbans {chan value} {
+    set out [list]
+    if {[catch {chanbans $chan} bans]} { return {} }
+    foreach b $bans {
+        set mask [lindex $b 0]
+        if {$mask eq ""} { continue }
+        # -- the host part of the ban mask (everything after the last @)
+        set at [string last "@" $mask]
+        set bhost [expr {$at == -1 ? $mask : [string range $mask [expr {$at + 1}] end]}]
+        # -- a bare "*" host covers every host, so such a ban is not specific to this entry: it is
+        # -- targeting a nick or ident instead (e.g. *nick*!*@* or *!*~ident@*).  reporting those
+        # -- for every whitelist entry is noise, so skip them.
+        if {$bhost eq "" || $bhost eq "*"} { continue }
+        # -- otherwise the ban blocks this entry if either host pattern covers the other
+        if {[string match -nocase $bhost $value] || [string match -nocase $value $bhost]} {
+            lappend out $mask
+        }
+    }
+    return $out
+}
 proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg
     variable entries;
@@ -6574,6 +6895,15 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     variable dbchans;
 
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
+
+    # -- pull the -unban flag out of the argument before anything parses it, so it cannot end up
+    # -- in the value, the action, or the stored reason
+    set dounban 0
+    set _words [list]
+    foreach _w [regexp -all -inline {\S+} $arg] {
+        if {[string equal -nocase $_w "-unban"]} { set dounban 1 } else { lappend _words $_w }
+    }
+    if {$dounban} { set arg [join $_words " "] }
 
     set cmd "add"
     lassign [db:get id,user users curnick $nick] uid user
@@ -6589,7 +6919,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     }
     set cid [db:get id channels chan $chan]
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
 
     set usage 0;
     set method [string tolower $method]
@@ -6601,6 +6931,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         xuser     { set method "user"    }
         host      { set method "host"    }
         h         { set method "host"    }
+        i         { set method "host"    }
         ip        { set method "host"    }
         net       { set method "host"    }
         mask      { set method "host"    }
@@ -6645,6 +6976,13 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
     set syntax "\002usage:\002 add ?chan? <white|black${xtra1}> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? $xtra2"
 
+    # -- an unrecognised list or method set $usage above; without this check the entry was created
+    # -- with the bogus method stored verbatim (e.g. "i"), and scan:match never matches it
+    if {$usage} {
+        reply $stype $starget $syntax
+        return;
+    }
+
 	# Check for missing value or method FIRST for general usage
     if {$value eq "" || $method eq ""} {
         # This condition is met when only "add" is typed
@@ -6674,7 +7012,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
             }
         }
 
-        set comment [lrange $arg 3 end]
+        set comment [arg:tail $arg 3]
 
         if {$method eq "last"} {
             if {![info exists data:lasthosts($chan)]} { reply $type $target "error: no hosts in memory."; return; }
@@ -6735,13 +7073,13 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         set origlimit "$joins:$secs:$hold"
         if {$secs eq $hold} { set newlimit "$joins:$secs" } else { set newlimit $origlimit }
         set limit "$joins:$secs:$hold"
-        set reason [lrange $arg $tn end]
+        set reason [arg:tail $arg $tn]
     } else {
         set limit "1:1:1"
         if {$ischan} {
-            set reason [lrange $arg [expr $tn + 1] end]
+            set reason [arg:tail $arg [expr {$tn + 1}]]
         } else {
-            set reason [lrange $arg $tn end]
+            set reason [arg:tail $arg $tn]
         }
     }
 
@@ -6854,6 +7192,23 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
             debug 4 "\002cmd:add:\002 iaction: $iaction (action: $action) -- ilimit: $ilimit (limit: $limit) -- iflags: $iflags (flags: $flags)"
 
             if {$action eq $iaction && $limit eq $ilimit && $flags eq $iflags} {
+                # -- entry already exists: -unban still lifts channel bans blocking a white host entry
+                if {$dounban && $list eq "white" && $method eq "host"} {
+                    set utotal 0; set uparts [list]
+                    foreach ubchan [add:feedback:chans $chan $starget] {
+                        set blocking [add:blockingbans $ubchan $value]
+                        if {[llength $blocking] == 0} { continue }
+                        incr utotal [llength $blocking]
+                        mode:unban $ubchan $blocking
+                        lappend uparts "$ubchan: [join [lrange $blocking 0 3] {, }]"
+                    }
+                    if {$utotal > 0} {
+                        reply $type $target "\002note:\002 lifted $utotal ban[expr {$utotal==1?"":"s"}] on [join [lrange $uparts 0 3] {; }][expr {[llength $uparts] > 4 ? " ..." : ""}] (${list}list entry \002$id\002 already exists, unchanged)"
+                    } else {
+                        reply $type $target "\002note:\002 no active bans block this entry (${list}list entry \002$id\002 already exists, unchanged)"
+                    }
+                    return;  # -- repeating the add to unban is not an error
+                }
                 reply $type $target "\002error:\002 a matching ${list}list entry with identical behaviour already exists. (\002id:\002 $id -- \002type:\002 $method -- \002value:\002 $value)";
                 return;        
             }
@@ -6870,7 +7225,7 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
         set timestamp [unixtime]; set modifby $source
 
-        debug 1 "arm:cmd:add: adding entry: chan: $chan -- type: $prefix -- method: $method -- value: $value -- modifby: $modifby -- action: $action -- reason: [join $reason]"
+        debug 1 "arm:cmd:add: adding entry: chan: $chan -- type: $prefix -- method: $method -- value: $value -- modifby: $modifby -- action: $action -- reason: $reason"
 
         set id [db:add $prefix $chan $method $value $modifby $action $limit $reason]
 
@@ -6878,12 +7233,62 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
 
         if {$method eq "text"} {
             if {$list eq "black"} {
-                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reply:\002 [join $reason])"
+                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reply:\002 $reason)"
             } else {
-                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002reply:\002 [join $reason])"
+                reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002reply:\002 $reason)"
             }
         } else {
-            reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reason:\002 [join $reason])"
+            reply $type $target "added $method ${list}list entry (\002id:\002 $id -- \002value:\002 $value -- \002action:\002 ${theaction}${textlimit}-- \002reason:\002 $reason)"
+        }
+
+        # -- advisory feedback: which current users this hits, and any conflicting entries.
+        # -- purely informational; it never blocks the add.
+        if {$method in {host user regex}} {
+            set fbchans [add:feedback:chans $chan $starget]
+            # -- aggregate matches across every channel the entry will apply on
+            set total 0; set parts [list]
+            foreach fbchan $fbchans {
+                set mu [add:matchusers $fbchan $method $value]
+                set mc [lindex $mu 0]
+                if {$mc > 0} {
+                    incr total $mc
+                    lappend parts "$fbchan: [join [lrange $mu 1 4] {, }][expr {$mc > 4 ? " +[expr {$mc - 4}]" : ""}]"
+                }
+            }
+            if {$total > 0} {
+                set shown [lrange $parts 0 3]
+                set more [expr {[llength $parts] > 4 ? " ..." : ""}]
+                reply $type $target "\002note:\002 matches $total user[expr {$total==1?"":"s"}] now on [join $shown {; }]$more"
+            }
+            set conf [add:conflicts $chan $method $value $list]
+            if {[llength $conf] > 0} {
+                reply $type $target "\002note:\002 overlaps existing [join [lrange $conf 0 4] {, }][expr {[llength $conf]>5?" ...":""}]"
+            }
+
+            # -- for a whitelist host entry, surface (and optionally lift) channel bans that would
+            # -- still keep the host out.  acting is opt-in via -unban, matching the -force convention.
+            if {$list eq "white" && $method eq "host"} {
+                set btotal 0; set bparts [list]
+                foreach fbchan $fbchans {
+                    set blocking [add:blockingbans $fbchan $value]
+                    if {[llength $blocking] == 0} { continue }
+                    incr btotal [llength $blocking]
+                    if {$dounban} {
+                        mode:unban $fbchan $blocking
+                        lappend bparts "$fbchan: [join [lrange $blocking 0 3] {, }]"
+                    } else {
+                        lappend bparts "$fbchan: [join [lrange $blocking 0 3] {, }]"
+                    }
+                }
+                if {$btotal > 0} {
+                    set bshown [join [lrange $bparts 0 3] {; }][expr {[llength $bparts] > 4 ? " ..." : ""}]
+                    if {$dounban} {
+                        reply $type $target "\002note:\002 lifted $btotal ban[expr {$btotal==1?"":"s"}] on $bshown"
+                    } else {
+                        reply $type $target "\002note:\002 $btotal active ban[expr {$btotal==1?"":"s"}] still [expr {$btotal==1?"blocks":"block"}] this on $bshown -- repeat the add with \002-unban\002 to lift"
+                    }
+                }
+            }
         }
 
         set tchans [list]
@@ -6911,11 +7316,11 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
                         foreach i [get:val data:hostnicks $tvalue,$lchan] {
                             incr hit
                             lassign [split [getchanhost $i] @] ident host
-                            kickban $i $ident $host $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
+                            kickban $i $ident $host $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: $reason) \[id: $id\]" $id
                         }
                     }
                     if {!$hit} {
-                        kickban 0 $mask 0 $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: [join $reason]) \[id: $id\]" $id
+                        kickban 0 $mask 0 $tchan [cfg:get ban:time $tchan] "Armour: blacklisted -- $value (reason: $reason) \[id: $id\]" $id
                     }
                 }
             }
@@ -6950,7 +7355,7 @@ proc arm:cmd:rem {0 1 2 3 {4 ""} {5 ""}} {
     }
     set cid [db:get id channels chan $chan]
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set globlevel [db:get level levels cid 1 uid $uid]
     if {$globlevel eq ""} { set globlevel 0 }
     
@@ -7140,13 +7545,13 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
     lassign [db:get id,user users curnick $nick] uid user
 
     # -- deal with the optional channel argument
-    set first [lindex $arg 0]; set ischan 0; set idgiven 0
+    set first [arg:word $arg 0]; set ischan 0; set idgiven 0
     if {[string index $first 0] eq "#" || [string index $first 0] eq "*"} {
         # -- chan (or global) provided
-        set ischan 1; lassign $arg tchan ids param; set setval [lrange $arg 3 end]
+        set ischan 1; set tchan [arg:word $arg 0]; set ids [arg:word $arg 1]; set param [arg:word $arg 2]; set setval [arg:tail $arg 3]
     } else {
         # -- chan not provided
-        lassign $arg ids param; set setval [lrange $arg 2 end]
+        set ids [arg:word $arg 0]; set param [arg:word $arg 1]; set setval [arg:tail $arg 2]
         set tchan [userdb:get:chan $user $chan]; # -- find a logical chan
     }
     set cid [db:get id channels chan $tchan]
@@ -7310,13 +7715,16 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
             }
 
             # -- check if value is already set
-            if {$value eq [join $setval]} {
-                reply $type $target "\002(\002error\002)\002 $tchan id: $id -- $param is already set to: \002[join $setval]\002."
+            # -- depends arrives as a split list of ids; everything else is the verbatim value
+            set plain [expr {$param eq "depends" ? [join $setval] : $setval}]
+            if {$value eq $plain} {
+                reply $type $target "\002(\002error\002)\002 $tchan id: $id -- $param is already set to: \002$plain\002."
                 return;
             }
-            set db_setval [join [db:escape $setval]]
-            set dictval $setval; set col $param;
-            dict set entries $id $col $db_setval
+            set db_setval [db:escape $plain]
+            set dictval $plain; set col $param;
+            # -- store the real value in memory, not the SQL-escaped copy (don't -> don''t until restart)
+            dict set entries $id $col $dictval
         }
 
         if {$col eq "limit"} { set col "\"limit\"" }; # -- safety net for special column name
@@ -7329,13 +7737,13 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
             set setval [join $setval ,]
             if {$setval eq ""} { set setval "null" }
         }
-        debug 1 "arm:cmd:mod: modified $list $method entry: $value (chan: $tchan -- id: $id -- param: $param -- value: [join $setval])"
-        reply $type $target "modified $method $list entry (\002chan:\002 $tchan -- \002id:\002 $id -- \002$param:\002 [join $setval])"
+        debug 1 "arm:cmd:mod: modified $list $method entry: $value (chan: $tchan -- id: $id -- param: $param -- value: $setval)"
+        reply $type $target "modified $method $list entry (\002chan:\002 $tchan -- \002id:\002 $id -- \002$param:\002 $setval)"
     }
     # -- end of foreach
     
     # -- create log entry for command use
-    set log "$tchan [join $arg]"; set log [string trimright $log " "]
+    set log "$tchan [string trim $arg]"; set log [string trimright $log " "]
     log:cmdlog BOT $tchan $cid $user $uid [string toupper $cmd] $log "$nick!$uh" "" "" ""
     return;
 }
@@ -7376,7 +7784,7 @@ proc arm:cmd:showlog {0 1 2 3 {4 ""} {5 ""}} {
         }
     }
     set text [string tolower $arg]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set c 0; set max 5 
     foreach i $text {
         if {$i eq "-cmd"} {
@@ -7675,7 +8083,7 @@ proc arm:cmd:note {0 1 2 3 {4 ""} {5 ""}} {
         reply $type $target "done."
     }
     # -- create log entry for NOTE command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -7697,7 +8105,7 @@ proc arm:cmd:queue {0 1 2 3 {4 ""} {5 ""}} {
     set chan [lindex $arg 0]; 
     if {$chan eq ""} { set chan [userdb:get:chan $user $chan] }; # -- predict chan when not given
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set lchan [string tolower $chan]
     # -- command: queue    
     
@@ -7723,7 +8131,7 @@ proc arm:cmd:queue {0 1 2 3 {4 ""} {5 ""}} {
         reply $type $target "no channels in \002secure\002 mode found."
     } else {
         # -- create log entry
-        log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+        log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
     }
 }
 
@@ -7744,7 +8152,7 @@ proc arm:cmd:ignore {0 1 2 3 {4 ""} {5 ""}} {
     set cid [db:get id channels chan $chan]
 
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     set lchan [string tolower $chan]
     # -- command: ignore
 
@@ -7816,7 +8224,7 @@ proc arm:cmd:ignore {0 1 2 3 {4 ""} {5 ""}} {
         db:connect
         if {[string is digit $mask]} {
             set itype "ID"
-            set res [db:query "SELECT mask FROM ignores WHERE id='$mask' AND cid='$cid'"]
+            set res [db:qbind {SELECT mask FROM ignores WHERE id = :mask AND cid = :cid} mask $mask cid $cid]
         } else {
             set itype "mask"
             set res [db:query "SELECT mask FROM ignores WHERE lower(mask)='[string tolower $mask]' AND cid='$cid'"]
@@ -7832,7 +8240,7 @@ proc arm:cmd:ignore {0 1 2 3 {4 ""} {5 ""}} {
         }
         db:connect
         if {[string is digit $mask]} {
-            db:query "DELETE FROM ignores WHERE id='$mask' AND cid='$cid'"
+            db:qbind {DELETE FROM ignores WHERE id = :mask AND cid = :cid} mask $mask cid $cid
         } else {
             db:query "DELETE FROM ignores WHERE lower(mask)='[string tolower $mask]' AND cid='$cid'"
         }
@@ -7927,7 +8335,7 @@ proc arm:cmd:ignore {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # -- create log entry
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: captcha
@@ -7952,7 +8360,7 @@ proc arm:cmd:captcha {0 1 2 3 {4 ""} {5 ""}} {
     }; 
     
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
 
     # -- end default proc template
 
@@ -8160,11 +8568,15 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
     
     lassign [db:get id,user users curnick $nick] uid user
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"
 
-    set botname [lindex $arg 0]
-    set defchan [lindex $arg 1]
-    set settings [lrange $arg 2 end]
+    set botname [arg:word $arg 0]
+    set defchan [arg:word $arg 1]
+    # -- settings are list-parsed on purpose: {realname=I am a string} groups a multi-word value
+    if {[catch {lrange $arg 2 end} settings]} {
+        reply $stype $starget "\002error:\002 malformed settings (unbalanced braces or quotes)"
+        return
+    }
     if {$botname eq "" || $defchan eq ""} {
         # -- botname must be given
         reply $stype $starget "\002usage:\002 deploy <bot> <chan> \[setting1=value1 setting2=value2 settingN=valueN...\]"
@@ -8178,7 +8590,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         reply $stype $starget "\002error:\002 default channel already specified with \002<chan>\002 parameter."
         return;
     }
-    append settings " chan:def=$defchan"
+    lappend settings "chan:def=$defchan"
 
     # -- check for install script
     if {![file exists "./armour/install.sh"]} {
@@ -8186,6 +8598,12 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         return; 
     }
 
+    # -- SECURITY: the bot name becomes file names and exec arguments (cp, rm, autobotchk, sed);
+    # -- "../" walked out of deploy/, and a leading ">" turned an argument into a redirection
+    if {![regexp -- {^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$} $botname]} {
+        reply $stype $starget "\002error:\002 bot name may only contain letters, digits, _ and - (max 32)"
+        return
+    }
     if {$botname eq ${botnet-nick}} {
         # -- bot is self
         reply $stype $starget "\002error:\002 uhh, I already exist."
@@ -8193,7 +8611,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # -- check for custom network
-    set netset [lsearch "network=*" $settings]
+    set netset [lsearch -glob $settings "network=*"];  # -- arguments were reversed: this override was always ignored
     if {$netset ne -1} {
         set value [lindex $settings $netset]
         regexp {^network=(.+)$} $value -> netval
@@ -8202,6 +8620,10 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         set netval $network
     }
     set netval [string tolower $netval]
+    if {![regexp -- {^[a-z0-9][a-z0-9_.-]*$} $netval]} {
+        reply $stype $starget "\002error:\002 invalid network name: $netval"
+        return
+    }
 
     if {[file exists "./$botname.conf"] || [file exists "./armour/$botname.conf"]} {
         # -- botname already exists
@@ -8222,32 +8644,37 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # -- copy the deployment template file
-    exec cp ./armour/deploy/$netval.ini ./armour/deploy/$botname.ini
+    file copy ./armour/deploy/$netval.ini ./armour/deploy/$botname.ini
     debug 1 "\002cmd:deploy:\002 copied ./armour/deploy/$netval.ini to ./armour/deploy/$botname.ini"
 
-    set os [exec uname]
     set count 0
     set done [list]
     # -- process the provided settings
     # -- note: multi word values must be wrapped in curly braces, e.g., {realname=I am a string}
-    set settings [join $settings]
+    # -- (these two joins flattened {realname=I am a string} into separate words, breaking it)
     foreach setting $settings {
-        set setting [join $setting]        
         set invalid 0
         # -- check format of setting=value in command
         if {![regexp {^([^=]+)=(.+)$} $setting -> fset fval]} { set invalid 1 }
 
-        set fset [string tolower $fset]
-        set fval [string trimleft $fval \"]
-        set fval [string trimright $fval \"]
-
-        # -- check if setting exists in deploy file
-        debug 3 "\002cmd:deploy:\002 checking deploy/$botname.ini for setting: $fset"
-        set err [catch {exec egrep "^$fset\=" ./armour/deploy/$botname.ini} result]
-        if {$err ne 0} { set invalid 1 }
+        if {!$invalid} {
+            set fset [string tolower $fset]
+            set fval [string trimleft $fval \"]
+            set fval [string trimright $fval \"]
+            # -- SECURITY: values end up in sed commands (here and in install.sh) and in Tcl config
+            # -- files sourced at startup; refuse the characters that are special in any of those
+            if {![regexp -- {^[a-z0-9][a-z0-9_.:-]*$} $fset]} { set invalid 1 }
+            if {[regexp -- {[|&\\"$\[\]`\x00-\x1f\x7f]} $fval]} { set invalid 1 }
+        }
+        if {!$invalid} {
+            # -- check if setting exists in deploy file
+            debug 3 "\002cmd:deploy:\002 checking deploy/$botname.ini for setting: $fset"
+            if {![file:hasline ./armour/deploy/$botname.ini "$fset="]} { set invalid 1 }
+        }
+        if {![info exists fset]} { set fset $setting }
 
         if {$invalid} {
-            exec rm ./armour/deploy/$botname.ini
+            file delete ./armour/deploy/$botname.ini
             debug 1 "\002cmd:deploy:\002 invalid deployment setting: $fset -- deleted ./armour/deploy/$botname.ini"
             reply $type $target "\002error:\002 invalid deployment setting: $fset"
             return;
@@ -8262,11 +8689,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
         }
 
         set updated_line "$fset=\"$fval\""
-        if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-            exec sed -i '' "s|^$fset=.*$|$updated_line|" ./armour/deploy/$botname.ini
-        } else {
-            exec sed -i "s|^$fset=.*$|$updated_line|" ./armour/deploy/$botname.ini
-        }
+        file:setline ./armour/deploy/$botname.ini "$fset=" $updated_line
         debug 1 "\002cmd:deploy:\002 updated line in ./armour/deploy/$botname.ini: $updated_line"
         incr count
     }
@@ -8289,11 +8712,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
                 set val [set [subst $setting]]
             }
             set updated_line "$setting=\"$val\""
-            if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-                exec sed -i '' "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            } else {
-                exec sed -i "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            }
+            file:setline ./armour/deploy/$botname.ini "$setting=" $updated_line
             debug 1 "\002cmd:deploy:\002 updated line in ./armour/deploy/$botname.ini: $updated_line"
             incr count
         }
@@ -8310,11 +8729,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
             # -- default to existing var
             set val [cfg:get $setting]
             set updated_line "$setting=\"$val\""
-            if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-                exec sed -i '' "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            } else {
-                exec sed -i "s|^$setting=.*$|$updated_line|" ./armour/deploy/$botname.ini
-            }
+            file:setline ./armour/deploy/$botname.ini "$setting=" $updated_line
             debug 1 "\002cmd:deploy:\002 updated line in ./armour/deploy/$botname.ini: $updated_line"
             incr count
         }
@@ -8359,11 +8774,7 @@ proc arm:cmd:deploy {0 1 2 3 {4 ""} {5 ""}} {
                 debug 0 "\002cmd:deploy:\002 added cronjob for $botname"
                 # -- fix 'userfile="db/$uservar.user"' line in botchk
                 set newline "userfile=\"db/$botname.user\""
-                if {$os in "FreeBSD OpenBSD NetBSD Darwin"} {
-                    exec sed -i '' "s|^userfile=.*$|$newline|" ./$botname.botchk
-                } else {
-                    exec sed -i "s|^userfile=.*$|$newline|" ./$botname.botchk
-                }
+                file:setline ./$botname.botchk "userfile=" $newline
             } else {
                 debug 0 "\002cmd:deploy:\002 error adding cronjob for $botname: $res"
             }
@@ -8777,7 +9188,7 @@ proc raw:join {nick uhost hand chan} {
         # -- build list to use at /endofwho
         debug 3 "\002raw:join:\002 appending to scan:list(data,$lchan): \002nick:\002 $nick -- \002chan:\002 $chan -- \002clicks: $start\002 -- \002ident:\002 $ident \
             -- \002ip:\002 $ip -- \002host:\002 $host -- \002xuser:\002 $xuser -- \002rname:\002 $rname"
-        lappend scan:list(data,$lchan) "[list $nick] $chan 0 $start $ident $ip $host $xuser $rname"
+        lappend scan:list(data,$lchan) "[list $nick] $chan 0 $start $ident $ip $host $xuser [list [join $rname]]"
 
         # -- end paste
         
@@ -9016,6 +9427,22 @@ proc raw:oper {server cmd text} {
 # -- proc for generic response (raw 352)
 # -- add handling per ircd type
 # -- this isn't returned on ircu (Undernet) for our special /WHOs that specify a 'querytype'
+# -- parse a 352 WHO reply (IRCnet-style, with server ID) as text, never as a Tcl list
+# --   mynick chan ident host server nick flags :hopcount SID realname...
+# -- the realname is user-controlled: an unbalanced brace or quote in it made lassign/lrange throw
+# -- returns: mynick chan ident host server nick flags hopcount sid rname  (rname: list of words)
+# --          or "" if the line is malformed
+proc raw:parse:352 {arg} {
+    set idx [string first " :" $arg]
+    if {$idx == -1} { return "" }
+    set params [regexp -all -inline {\S+} [string range $arg 0 [expr {$idx - 1}]]]
+    if {[llength $params] < 7} { return "" }
+    lassign $params mynick chan ident host server nick flags
+    regexp -- {^(\S*)\s*(\S*)\s?(.*)$} [string range $arg [expr {$idx + 2}] end] -> hopcount sid rtext
+    set rname [regexp -all -inline {\S+} $rtext]
+    return [list $mynick $chan $ident $host $server $nick $flags $hopcount $sid $rname]
+}
+
 proc raw:genwho {server cmd arg} {
     variable cfg
     # -- ircd types:
@@ -9027,8 +9454,9 @@ proc raw:genwho {server cmd arg} {
         # -- IRCnet/EFnet
         #server    cmd    mynick type ident host server nick away :hopcount sid rname
         #irc.psychz.net    352    cori * _mxl    ipv4.pl    ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick chan ident host server nick flags hopcount sid
-        set rname [lrange $arg 10 end]
+        set parsed [raw:parse:352 $arg]
+        if {$parsed eq ""} { debug 1 "\002raw:genwho:\002 malformed 352: $arg"; return; }
+        lassign $parsed mynick chan ident host server nick flags hopcount sid rname
         # -- NOTE: the above raw example doesn't appear to provide an actual IP; do a DNS lookup (doh! this slows us down)
         if {![isValidIP $host]} {
             # -- only do this if it's not already an IPv4 IP
@@ -9243,7 +9671,7 @@ proc who {nick chan ident host ip flags xuser rname} {
         if {[info exists scan:full($chan,state)]} { set full 1 } else { set full 0 }
         debug 3 "who: appending to scan:list(data,$lchan): nick: $nick -- chan -- $chan -- full: $full -- clicks: $start -- ident: $ident -- ip: $ip -- host: $host -- xuser: $xuser -- rname: [join $rname]"
         lappend scan:list(nicks,$lchan) $nick
-        lappend scan:list(data,$lchan) "[list $nick] $chan $full $start $ident $ip $host $xuser [list $rname]"
+        lappend scan:list(data,$lchan) "[list $nick] $chan $full $start $ident $ip $host $xuser [list [join [join $rname]]]"
         #debug 3 "\002who: scan:list(data,$lchan):\002 [get:val scan:list data,$lchan]"
     }
 }
@@ -9372,10 +9800,9 @@ proc raw:endofwho {server cmd text} {
         lassign [split $cgroup ,] data lchan
         foreach i [get:val scan:list data,$lchan] {
             lassign $i nick chan full clicks ident ip host xuser
-            set rname [lrange $i 8 end]
+            set rname [lindex $i 8];  # -- both writers store the plain realname as one element
             if {$nick ni $leavelist} {
                 set lchan [join [lindex [split $cgroup ,] 1]]
-                set rname [list $rname]
                 debug 3 "raw:endofwho: sending arg to arm::scan: nick: $nick -- chan: $chan -- full: $full -- clicks: $clicks -- ident: $ident -- ip: $ip -- host: $host -- xuser: $xuser -- rname: $rname"
                 scan [list $nick] $chan $full $clicks $ident $ip $host $xuser $rname
             }
@@ -9440,7 +9867,8 @@ proc mode:add:D {nick uhost hand chan mode target} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
         }]]
-        dict set dbchans $cid mode secure;  # -- dict: channel mode
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
+        if {$cid ne "" && [dict exists $dbchans $cid]} { dict set dbchans $cid mode secure }; # -- dict: channel mode
         if {![info exists voicecache($chan)]} {
             reply pub $chan "changed mode to: secure"
         }
@@ -9478,7 +9906,8 @@ proc mode:rem:D {nick uhost hand chan mode target} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
         }]]
-        dict set dbchans $cid mode on;  # -- dict: channel mode
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
+        if {$cid ne "" && [dict exists $dbchans $cid]} { dict set dbchans $cid mode on }; # -- dict: channel mode
         if {![info exists voicecache($chan)]} {
             # -- only report if not automatically removing mode after a floodnet detection window expiry
             reply pub $chan "changed mode to: \002on\002"
@@ -9664,6 +10093,7 @@ proc mode:add:o {nick uhost hand chan mode target} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
         }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
         float:check:chan $cid
         set atopic:topic($lchan) 1; # -- track for RAW 332 response
         debug 4 "mode:add:o: sending to server: TOPIC $chan"
@@ -9754,7 +10184,7 @@ proc mode:rem:b {nick uhost hand chan mode target} {
             set action [dict get $entries $id action]
             set limit [dict get $entries $id limit]
             set hits [dict get $entries $id hits]
-            set reason [join [dict get $entries $id reason]]
+            set reason [dict get $entries $id reason]; # -- stored verbatim/normalised, do not list-parse
             set ext [lassign [split $limit :] joins secs hold]
             if {$secs eq $hold} { set limit "$joins:$secs" }
             if {$type eq "white"} { set list "whitelist" } \
@@ -9865,12 +10295,18 @@ proc raw:topic {server cmd arg} {
     variable dbchans
     
     # :foo.undernet.org 332 Empus #armour :Armour -- https://armour.bot -- Upcoming v4.1 Release (work-in-progress): https://armour.bot/changelog/#preview
-    set chan [lindex $arg 1]
+    set chan [lindex [split $arg] 1]
     set lchan [string tolower $chan]
     if {![info exists atopic:topic($lchan)]} { return; }; # -- not expecting TOPIC response for this channel
 
-    set topic [lrange $arg 2 end]
-    set topic [string trimleft $topic :]
+    # -- take the topic exactly as sent: list-parsing it altered topics containing [ $ \ or runs of
+    # -- spaces, so atopic:set never saw a match and re-set the topic on every check
+    set idx [string first " :" $arg]
+    if {$idx != -1} {
+        set topic [string range $arg [expr {$idx + 2}] end]
+    } else {
+        set topic [join [lrange [split $arg] 2 end]];  # -- no ':' prefix (single-word topic)
+    }
 
     atopic:set $chan $topic; # -- send to code common to raw 331 & 332
 }
@@ -9878,7 +10314,7 @@ proc raw:topic {server cmd arg} {
 # -- AUTOTOPIC raw: no such topic
 proc raw:notopic {server cmd arg} {
     variable atopic:topic
-    set chan [lindex $arg 1]
+    set chan [lindex [split $arg] 1]
     set lchan [string tolower $chan]
     if {![info exists atopic:topic($lchan)]} { return; }; # -- not expecting TOPIC response for this channel
     atopic:set $chan ""; # -- send to code common to raw 331 & 332
@@ -11933,7 +12369,8 @@ proc flud:lock {chan} {
                 set cid [dict keys [dict filter $dbchans script {id dictData} { 
                     expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
                 }]]
-                dict set dbchans $cid mode "secure";  # -- dict: channel mode
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
+                if {$cid ne "" && [dict exists $dbchans $cid]} { dict set dbchans $cid mode "secure" }; # -- dict: channel mode
                 set voicecache($chan) [list]
                 set clist [chanlist $chan]
                 foreach n $clist {
@@ -12172,7 +12609,7 @@ proc userdb:msg:pass {nick uhost hand arg} {
         return;
     }
 
-    set firstpass [lrange $arg 1 end]
+    set firstpass [arg:tail $arg 1];  # -- verbatim: never list-parsed
     #*msg:pass $nick $uhost $hand "pass $arg"; # -- set initial eggdrop password
 
     set owner [lindex [userlist] 0]
@@ -12227,7 +12664,7 @@ proc userdb:msg:inituser {nick uhost hand arg} {
         set rand 1
     } else { set password $firstpass; set rand 0 }
     
-    set encpass [userdb:encrypt $password]; # -- hashed password
+    set encpass [userdb:hash $password]; # -- hashed password
     db:connect
     set db_user [db:escape $user]
     set db_xuser [db:escape $account]
@@ -12304,7 +12741,7 @@ proc userdb:msg:inituser {nick uhost hand arg} {
     
     # -- command log entry
     set cmd "inituser"
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] "$nick!$uhost" "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] "$nick!$uhost" "" "" ""
 
 }
 
@@ -12341,7 +12778,7 @@ proc userdb:cmd:do {0 1 2 3 {4 ""}  {5 ""}} {
     foreach line $error { reply $type $target $line }
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -12678,7 +13115,7 @@ proc userdb:cmd:userlist {0 1 2 3 {4 ""}  {5 ""}} {
         set xtra "WHERE lower(chan)='[db:escape $chan]'"
     } else { set chan [userdb:get:chan $user $chan]; set xtra "" }
     set lchan [string tolower $chan]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     set cid [db:get id channels chan $chan]
 
@@ -12735,7 +13172,7 @@ proc userdb:cmd:userlist {0 1 2 3 {4 ""}  {5 ""}} {
     }
     
     # -- create log entry for command use
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: chanlist
@@ -12795,7 +13232,7 @@ proc userdb:cmd:chanlist {0 1 2 3 {4 ""}  {5 ""}} {
     reply $type $target "\[\002chanlist\002\]: $chanlist"    
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: adduser
@@ -12823,7 +13260,7 @@ proc userdb:cmd:adduser {0 1 2 3 {4 ""}  {5 ""}} {
     }
     set cid [db:get id channels chan $chan]
     set lchan [string tolower $chan]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
 
     # -- command: adduser
     if {$trguser eq "" || $trglevel eq ""} {
@@ -12903,7 +13340,7 @@ proc userdb:cmd:adduser {0 1 2 3 {4 ""}  {5 ""}} {
     }
     
     # -- create log entry for command use
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: remuser
@@ -12930,7 +13367,7 @@ proc userdb:cmd:remuser {0 1 2 3 {4 ""}  {5 ""}} {
     }
     set cid [db:get id channels chan $chan]
     set lchan [string tolower $chan]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
 
     # -- command: remuser
     if {$trguser eq ""} {
@@ -12992,7 +13429,7 @@ proc userdb:cmd:remuser {0 1 2 3 {4 ""}  {5 ""}} {
     }
         
     # -- create log entry for command use
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: addchan
@@ -13019,7 +13456,7 @@ proc userdb:cmd:addchan {0 1 2 3 {4 ""}  {5 ""}} {
 
     set achan [lindex $arg 0]
     set tuser [lindex $arg 1]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
 
     # -- command: addchan
     if {$achan eq ""} {
@@ -13100,7 +13537,7 @@ proc userdb:cmd:addchan {0 1 2 3 {4 ""}  {5 ""}} {
 }
 
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: remchan
@@ -13125,7 +13562,7 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
     if {![userdb:isAllowed $nick $cmd $rchan $type]} { return; }
 
     set isforce [lindex $arg 1]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
 
     # -- command: remchan
     if {$rchan eq ""} {
@@ -13218,7 +13655,7 @@ proc userdb:cmd:remchan {0 1 2 3 {4 ""}  {5 ""}} {
     reply $type $target "🗑️ Success: Channel \002$tchan\002 has been purged. \002$count\002 exclusive user(s) were also removed."
 
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: modchan
@@ -13246,8 +13683,14 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
         set ttype [lindex $arg 0]; set value [lrange $arg 1 end]
     }
     set cid [db:get id channels chan $chan]
+    # -- an unknown channel yields an empty cid; writing dbchans with it creates an entry with no
+    # -- "chan" key, which breaks every consumer that iterates the dict (see mode:add:D et al)
+    if {$cid eq ""} {
+        reply $stype $starget "\002error:\002 channel \002$chan\002 is not registered."
+        return;
+    }
     set lchan [string tolower $chan]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
 
@@ -13301,7 +13744,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     set plugin(quote) 0; set plugin(trakka) 0; set plugin(twitter) 0; set plugin(openai) 0; set plugin(weather) 0;
     if {[info commands quote:cron] ne ""} { set plugin(quote) 1; append setlist " quote quoterand" }; # -- quote
     if {[info commands arm:cmd:tweet] ne ""} { set plugin(twitter) 1; append setlist " tweet tweetquote" }; # -- tweet
-    if {[info commands ask:query] ne ""} { set plugin(openai) 1; append setlist " openai image imagerand" }; # -- openai
+    if {[info commands ask:query] ne "" || [info commands arm:cmd:ask] ne ""} { set plugin(openai) 1; append setlist " openai image imagerand" }; # -- openai
     if {[info commands speak:query] ne ""} { set plugin(speak) 1; append setlist " speak" }; # -- speak
     if {[info commands sing:query] ne ""} { set plugin(sing) 1; append setlist " sing" }; # -- sing
     if {[info commands video:query] ne ""} { set plugin(video) 1; append setlist " video" }; # -- video
@@ -13451,8 +13894,9 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     }
     # -- update the setting!
     db:connect
-    if {$cvalue eq ""} { db:query "INSERT INTO settings (cid,setting,value) VALUES($cid,'$ttype','[db:escape $value]')" } \
-    else { db:query "UPDATE settings SET value='$value' WHERE cid=$cid AND setting='$ttype'" }
+    set db_value [db:escape $value]
+    if {$cvalue eq ""} { db:query "INSERT INTO settings (cid,setting,value) VALUES($cid,'$ttype','$db_value')" } \
+    else { db:query "UPDATE settings SET value='$db_value' WHERE cid=$cid AND setting='$ttype'" }
     db:close
     
     dict set dbchans $cid $ttype $value; # -- update the setting in dict
@@ -13470,7 +13914,7 @@ proc userdb:cmd:modchan {0 1 2 3 {4 ""} {5 ""}} {
     reply $type $target "done."
  
     # -- create log entry for command use
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 
 }
 
@@ -13500,7 +13944,7 @@ proc userdb:cmd:access {0 1 2 3 {4 ""}  {5 ""}} {
 
     if {$first eq "*"} { set cid 1 } else { set cid [db:get id channels chan $tchan] }
     set lchan [string tolower $tchan]
-    set log "$tchan [join $arg]"; set log [string trimright $log " "]
+    set log "$tchan [string trim $arg]"; set log [string trimright $log " "]
 
     # -- command: access
     if {$trguser eq ""} {
@@ -13561,7 +14005,7 @@ proc userdb:cmd:access {0 1 2 3 {4 ""}  {5 ""}} {
     if {$greet ne ""} { reply $type $target "\002greeting:\002 [join $greet]" }
             
     # -- create log entry for command use
-    log:cmdlog BOT $tchan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $tchan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: register
@@ -13653,7 +14097,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
         # -- ircd does not support ACCOUNT
         set xuser ""
         set newpass [randpass];                # -- random password
-        set encpass [userdb:encrypt $newpass]; # -- hashed random password
+        set encpass [userdb:hash $newpass]; # -- hashed random password
     }
 
     # -- what global level to use?
@@ -13721,7 +14165,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
     }
 
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: newuser
@@ -13764,7 +14208,7 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
         # -- generate a password
         set genpass [randpass]; # -- default length from config, and chars from proc
         # -- encrypt given pass
-        set encpass [userdb:encrypt $genpass]
+        set encpass [userdb:hash $genpass]
     }
     
     if {$globlvl ne ""} {
@@ -13846,7 +14290,7 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
         putquick "WHO $trgxuser a%nuhiat,101"
     }
     
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 # -- command: deluser
@@ -13915,7 +14359,7 @@ proc userdb:cmd:deluser {0 1 2 3 {4 ""}  {5 ""}} {
     reply $type $target "done. user \002$tuser\002 has been eradicated \002(uid:\002 $tuid)\002"
     
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 
@@ -13948,6 +14392,7 @@ proc userdb:cmd:verify {0 1 2 3 {4 ""}  {5 ""}} {
         set cid [dict keys [dict filter $dbchans script {id dictData} { 
             expr {[string tolower [dict get $dictData chan]] eq [string tolower $target]} 
         }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
         if {$cid ne ""} {
             set tuh [getchanhost $trgnick]
             if {$tuh ne ""} { 
@@ -13978,7 +14423,7 @@ proc userdb:cmd:verify {0 1 2 3 {4 ""}  {5 ""}} {
     reply $type $target $text
 
     # -- create log entry for command use
-    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
         
 }
 
@@ -13996,14 +14441,94 @@ proc userdb:pub:login {nick uhost hand chan arg} {
 
 # -- command: login
 # login <user> <passphrase>
+# -- password hashing.
+# -- historically passwords were stored as unsalted MD5, which is fast to attack and identical for
+# -- two users with the same password.  new hashes use a random 16-byte salt and iterated SHA-256,
+# -- stored as:  sha256:<iterations>:<salt-hex>:<hash-hex>
+# -- old MD5 hashes keep working and are upgraded in place on a successful login (see
+# -- userdb:pass:match), so nobody has to reset a password.
+variable passiter 1000;  # -- ~0.25s per check here; eggdrop is single-threaded, so keep it modest
+
+# -- 16 random bytes as hex, from the system CSPRNG where available
+proc userdb:salt {} {
+    if {![catch {
+        set fh [open /dev/urandom rb]; set raw [read $fh 16]; close $fh
+    }] && [string length $raw] == 16} {
+        return [binary encode hex $raw]
+    }
+    # -- fallback: weaker, but still per-user unique
+    set seed "[clock clicks][pid][clock seconds][expr {rand()}]"
+    return [string range [string tolower [::sha2::sha256 -hex $seed]] 0 31]
+}
+
+# -- derive the stored form.  pass an existing $stored to re-derive with its salt and iterations.
+proc userdb:hash {pass {stored ""}} {
+    variable passiter
+    set iter $passiter
+    set salt ""
+    if {$stored ne ""} {
+        set parts [split $stored ":"]
+        if {[llength $parts] == 4 && [lindex $parts 0] eq "sha256"} {
+            set iter [lindex $parts 1]
+            set salt [lindex $parts 2]
+        }
+    }
+    if {$salt eq ""} { set salt [userdb:salt] }
+    if {![string is integer -strict $iter] || $iter < 1} { set iter $passiter }
+    set h [::sha2::sha256 -bin "$salt$pass"]
+    for {set i 0} {$i < $iter} {incr i} { set h [::sha2::sha256 -bin "$h$salt"] }
+    return "sha256:$iter:$salt:[string tolower [binary encode hex $h]]"
+}
+
+# -- is this a new-format hash?
+proc userdb:hash:isnew {stored} {
+    return [expr {[string match "sha256:*" $stored] && [llength [split $stored ":"]] == 4}]
+}
+
+# -- verify a password against either hash format
+proc userdb:pass:verify {pass stored} {
+    if {$stored eq "" || $pass eq ""} { return 0 }
+    if {[userdb:hash:isnew $stored]} {
+        return [expr {[userdb:hash $pass $stored] eq $stored}]
+    }
+    return [expr {[userdb:encrypt $pass] eq $stored}]
+}
+
+# -- does the password typed in $arg (after the first $n words) match a stored hash?
+# -- returns "exact", "legacy", or "" for no match.
+# -- older versions list-parsed the password before hashing it, in one of two ways: login and
+# -- set hashed [join [lrange ...]], while newpass, logout and the first-run pass command hashed
+# -- [lrange ...].  for any password containing $ ; [ ] \ " { } or a leading #, the two differ,
+# -- so newpass stored a hash that login could never reproduce.  "legacy" means the stored hash
+# -- matched one of those old forms.  the hash is deliberately NOT re-saved in the exact form: a
+# -- stored hash cannot be told apart from an exact hash of a list-parsed string (e.g. hunter2 vs
+# -- a login typed as {hunter2}), so rewriting it could silently change -- and lock out -- a password.
+proc userdb:pass:match {arg n storepass} {
+    if {$storepass eq ""} { return "" }
+    set pass [arg:tail $arg $n]
+    if {$pass eq ""} { return "" }
+    if {[userdb:hash:isnew $storepass]} {
+        # -- new-format hash: no legacy list-parsed forms to consider
+        return [expr {[userdb:pass:verify $pass $storepass] ? "exact" : ""}]
+    }
+    if {[userdb:encrypt $pass] eq $storepass} { return "exact" }
+    foreach form {join list} {
+        # -- a legacy form that cannot be parsed (unbalanced brace or quote) cannot match
+        if {[catch {set legacy [lrange $arg $n end]}]} { continue }
+        if {$form eq "join"} { set legacy [join $legacy] }
+        if {$legacy ne "" && $legacy ne $pass && [userdb:encrypt $legacy] eq $storepass} { return "legacy" }
+    }
+    return ""
+}
+
 proc userdb:msg:login {nick uhost hand arg} {
     if {[userdb:isLogin $nick]} {
         # -- already logged in
         reply pub $nick "$nick: mate, you are already authenticated."
         return;
     }
-    set user [join [lindex $arg 0]]
-    set pass [join [lrange $arg 1 end]]
+    set user [arg:word $arg 0]
+    set pass [arg:tail $arg 1];  # -- verbatim: never list-parsed
     if {$user eq "" && $pass eq ""} { 
         # -- TODO: make it configurable to allow self login
         putquick "WHOIS $nick"
@@ -14028,9 +14553,6 @@ proc userdb:msg:login {nick uhost hand arg} {
     
     set cmd "login"
     
-    # -- encrypt given pass
-    set encrypt [userdb:encrypt $pass]
-    
     # -- check against user
     set storepass [userdb:user:get pass user $user]
     
@@ -14043,10 +14565,19 @@ proc userdb:msg:login {nick uhost hand arg} {
         return;
     }
         
-    # -- match encrypted passwords
-    if {$encrypt eq $storepass} {
+    # -- match encrypted passwords (accepting hashes made by older versions)
+    set match [userdb:pass:match $arg 1 $storepass]
+    if {$match ne ""} {
         # -- match successful, login
         debug 0 "userdb:msg:login: password match for $user, login successful"
+        if {$match eq "legacy"} { debug 1 "userdb:msg:login: $user matched a legacy (list-parsed) password hash" }
+        if {$match eq "exact" && ![userdb:hash:isnew $storepass]} {
+            # -- the typed password is definitely correct and was not list-parsed, so it is safe to
+            # -- re-store it as a salted hash.  a "legacy" match is deliberately not upgraded: the
+            # -- stored hash encodes a mangled form, and re-saving the typed text could lock the user out
+            userdb:user:set pass [userdb:hash $pass] user $user
+            debug 0 "userdb:msg:login: upgraded $user to a salted password hash"
+        }
         userdb:login $nick $uhost $user 1;  # -- send to common login code
                 
         # -- create log entry for command use
@@ -14085,7 +14616,7 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         set tuser [lindex $arg 0]; set ttype [lindex $arg 1]; set tvalue [lrange $arg 2 end]
     }
     set cid [db:get id channels chan $chan]
-    set log "$chan [join $arg]"; set log [string trimright $log " "]
+    set log "$chan [string trim $arg]"; set log [string trimright $log " "]
     
     # -- parse type
     set usage 0
@@ -14174,7 +14705,7 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         if {$tvalue eq $tlevel} { reply $type $target "\002(\002error\002)\002 what's the point?"; return; }
         # -- make the change
         db:connect
-        set query [db:query "UPDATE levels SET level='$tvalue' WHERE cid=$cid AND uid=$tuid"]
+        set query [db:qbind {UPDATE levels SET level = :tvalue WHERE cid = :cid AND uid = :tuid} tvalue $tvalue cid $cid tuid $tuid]
         db:close
         
         # -- send a note to the user?
@@ -14270,7 +14801,7 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
             if {$tcurnick ne ""} { set xtra "password sent via /notice" }
         } else { set newpass $tvalue }
         set xtra2 "password is $newpass"
-        set encpass [userdb:encrypt $newpass]; # -- hashed random password
+        set encpass [userdb:hash $newpass]; # -- hashed random password
         userdb:user:set pass $encpass id $tuid
         dict set dbusers $tuid pass $encpass
         reply $type $target "done. $xtra"
@@ -14321,10 +14852,10 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curtz eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$tuid','$tz')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$tuid','[db:escape $tz]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$tz' WHERE setting='tz' AND uid=$tuid"
+            db:query "UPDATE settings SET value='[db:escape $tz]' WHERE setting='tz' AND uid=$tuid"
         }
         db:close
         debug 0 "userdb:cmd:moduser: user $user ($source) modified $tuser's timezone to $tz"
@@ -14344,10 +14875,10 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curcity eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$tuid','$city')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$tuid','[db:escape $city]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$city' WHERE setting='city' AND uid=$tuid"
+            db:query "UPDATE settings SET value='[db:escape $city]' WHERE setting='city' AND uid=$tuid"
         }
         db:close
     }
@@ -14357,7 +14888,7 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
     if {$ttype eq "greet"} { set tvalue [join $tvalue] }; # Ensure greet value is a single string
     reply $type $target "🛠️ Success: Setting \002$ttype\002 for user \002$tuser\002 on channel \002$chan\002 has been updated to '\002$tvalue\002'."
         
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
     return;
 }
 
@@ -14378,10 +14909,10 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
     # -- command: moduser
         
     # -- check for optional chan, but it only applies to setting a greet
-    set first [string index [lindex $arg 0] 0]
+    set first [string index [arg:word $arg 0] 0]
     if {$first eq "#" || $first eq "*"} {
-        lassign $arg chan ttype
-        set tvalue [join [lrange $arg 2 end]]
+        set chan [arg:word $arg 0]; set ttype [arg:word $arg 1]
+        set tvalue [arg:tail $arg 2];  # -- verbatim: never list-parsed
         if {($ttype ne "greet" || [string index $ttype 0] ne "g") \
             && ($ttype ne "automode" && [string match $tvalue "au*"] ne $tvalue)} {
                 reply $type $target "\002error:\002 channel only applies to greet and automode. see: \002help set\002"
@@ -14389,8 +14920,8 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
         } 
     } else {
         # -- no chan given
-        set ttype [lindex $arg 0]
-        set tvalue [join [lrange $arg 1 end]]
+        set ttype [arg:word $arg 0]
+        set tvalue [arg:tail $arg 1];  # -- verbatim: never list-parsed
         set chan [userdb:get:chan $user $chan]; # -- automatically determine the channel if not provided
     }
         
@@ -14431,7 +14962,7 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
     
     if {$ttype eq "automode"} {
         # -- modifying automode
-        set tvalue [lindex $tvalue 0]
+        set tvalue [arg:word $tvalue 0]
         if {$level < 100 && $tvalue eq "op"} {
             reply $stype $starget "\002(\002error\002)\002 automode cannot be set to \002op\002 yourself for level $tlevel.";
         }
@@ -14460,7 +14991,7 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
     }
            
     if {$ttype eq "pass"} { 
-        set encpass [userdb:encrypt $tvalue];     # -- encrypt password
+        set encpass [userdb:hash $tvalue];     # -- encrypt password
         debug 0 "userdb:cmd:set: user $user ($nick![getchanhost $nick]) set password"
         userdb:user:set pass $encpass user $user; # -- make the change
     }
@@ -14500,10 +15031,10 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curtz eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$uid','$tz')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('tz','$uid','[db:escape $tz]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$tz' WHERE setting='tz' AND uid=$uid"
+            db:query "UPDATE settings SET value='[db:escape $tz]' WHERE setting='tz' AND uid=$uid"
         }
         db:close
         debug 0 "userdb:cmd:set: user $user ($source) set timezone to $tz"
@@ -14523,17 +15054,17 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
         db:connect
         if {$curcity eq ""} {
             # -- insert
-            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$uid','$city')"
+            db:query "INSERT INTO settings (setting,uid,value) VALUES ('city','$uid','[db:escape $city]')"
         } else {
             # -- update
-            db:query "UPDATE settings SET value='$city' WHERE setting='city' AND uid=$uid"
+            db:query "UPDATE settings SET value='[db:escape $city]' WHERE setting='city' AND uid=$uid"
         }
         db:close
     }
         
     if {$ttype eq "email"} {    
         # -- modifying e-mail address
-        set tvalue [lindex $tvalue 0]
+        set tvalue [arg:word $tvalue 0]
         # -- validate e-mail address
         if {![regexp -nocase {^[A-Za-z0-9\._%+-]+@[A-Za-z0-9\._%+-]+$} $tvalue]} { reply $type $target "\002(\002error\002)\002 invalid e-mail address."; return; }
         # -- make the change
@@ -14571,12 +15102,14 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
     reply $type $target "done."
     # -- create log entry for command use
     if {$ttype ne "pass"} {
-        set output [join $arg]
+        set output [string trim $arg]
     } else {
         # -- don't reveal the password
         set output "pass"
     }
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    # -- SECURITY: log $output, not the raw argument -- the mask above was computed but never used,
+    # -- so "set pass <password>" wrote the new password to the command log in plain text
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] $output $source "" "" ""
     return;
     
 }
@@ -14585,8 +15118,8 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
 # logout <user> <passphrase>
 proc userdb:msg:logout {nick uhost hand arg} {
     set cmd "logout"
-    set tuser [lindex $arg 0]
-    set pass [lrange $arg 1 end]
+    set tuser [arg:word $arg 0]
+    set pass [arg:tail $arg 1];  # -- verbatim: never list-parsed
 
     lassign [db:get id,curnick,user users curnick $nick] uid curnick user
 
@@ -14635,7 +15168,7 @@ proc userdb:msg:logout {nick uhost hand arg} {
     }
 
     # -- check against user
-    lassign [db:get id,user,curnick,pass users user $tuser] tuid tuser tcurnick storepass
+    lassign [db:get id,user,curnick,curhost,pass users user $tuser] tuid tuser tcurnick tcurhost storepass
     
     if {$self eq 0} {
         # -- logout for another user
@@ -14643,15 +15176,13 @@ proc userdb:msg:logout {nick uhost hand arg} {
             reply notc $nick "user $tuser is not authed."; 
             return;
         }
-        # -- encrypt given pass
-        set encrypt [userdb:encrypt $pass]
-    
-        # -- match encrypted passwords
-        if {$encrypt eq $storepass} {
-            # -- match successful, login
+        # -- match encrypted passwords (accepting hashes made by older versions)
+        if {[userdb:pass:match $arg 1 $storepass] ne ""} {
+            # -- match successful: log out the target user.  (this used to read an unset $tnick,
+            # -- which threw, and would otherwise have logged out the requester instead)
             debug 0 "userdb:msg:logout: password match for $tuser, logout successful"
-            set tnick $tnick
-            userdb:logout $nick $uhost; # -- send to common logout code
+            set tnick $tcurnick
+            set uhost $tcurhost
         } else {
             # -- no password match
             debug 0 "userdb:msg:logout password mismatch for user: $tuser, logout failed ($nick!$uhost)"
@@ -14681,7 +15212,7 @@ proc userdb:msg:logout {nick uhost hand arg} {
 # newpass <passphrase>
 proc userdb:msg:newpass {nick uhost hand arg} {
     set cmd "newpass"
-    set newpass [lrange $arg 0 end]
+    set newpass [arg:tail $arg 0];  # -- verbatim: never list-parsed
     if {$newpass eq ""} { reply notc $nick "\002usage:\002 newpass <passphrase>"; return; }
     
     # -- check if user is logged in
@@ -14689,7 +15220,7 @@ proc userdb:msg:newpass {nick uhost hand arg} {
     if {$user eq ""} { reply notc $nick "\002(\002error\002)\002 perhaps not. login first."; return; }
      
     # -- encrypt given pass
-    set encrypt [userdb:encrypt $newpass]
+    set encrypt [userdb:hash $newpass]
         
     debug 1 "userdb:msg:newpass: updating password for user: $user ($nick!$uhost)"
         
@@ -14845,10 +15376,18 @@ proc userdb:isValiduser {user} {
 }
 
 # -- encrypt password (basic md5)
+package require md5
 proc userdb:encrypt {pass} {
-    # -- md5sum hashes are diferent to md5 package
-    if {[exec uname] eq "Linux"} { return [lindex [exec echo $pass | md5sum] 0] }
-    return [::md5 $pass]; # -- BSD and macOS can use tcllib md5 as it's the same as md5 binary
+    # -- SECURITY: this used to run [exec echo $pass | md5sum].  exec treats an argument beginning
+    # -- with > or 2> as an output redirection, so a password such as ">armour/db/armour.db", sent
+    # -- to the unauthenticated login command, truncated any file the bot could write.
+    # -- it is now computed in-process.  the old digest was md5 of the password plus the newline
+    # -- echo appends, encoded the way exec encodes arguments (the system encoding), so the same
+    # -- bytes are hashed here and every existing stored hash stays valid.
+    if {$::tcl_platform(os) eq "Linux"} {
+        return [string tolower [::md5::md5 -hex [encoding convertto [encoding system] "$pass\n"]]]
+    }
+    return [::md5 $pass]; # -- BSD and macOS (unchanged)
 }
 
 
@@ -14914,6 +15453,12 @@ proc userdb:login {nick uhost user {manual "0"} {chan ""}} {
     variable dbusers; # -- dict to store users in memory
 
     lassign [db:get id,curnick,curhost users user $user] uid curnick curhost
+    # -- an unknown user yields an empty uid; writing dbusers with it creates an entry with no
+    # -- "user" key, which breaks anything iterating the dict (cf. the dbchans corruption)
+    if {$uid eq ""} {
+        debug 0 "\002userdb:login:\002 no such user: $user -- not updating dbusers"
+        return;
+    }
     
     if {$curnick eq $nick && $manual} { reply msg $nick "uhh, you're already logged in. \002try: logout\002"; return; }
     
@@ -15028,6 +15573,10 @@ proc userdb:logout {nick {uhost ""}} {
     set lnick [string tolower $nick]
     set row [lindex [db:query "SELECT id,user,curnick,curhost FROM users WHERE lower(curnick)='[db:escape $lnick]'"] 0]
     lassign $row uid user curnick curhost
+    if {$uid eq ""} {
+        debug 1 "\002userdb:logout:\002 no user record for $nick -- not updating dbusers"
+        return;
+    }
     if {$user ne ""} {
         # -- log them out
         set lastseen [clock seconds]
@@ -15382,8 +15931,11 @@ proc userdb:raw:genwho {server cmd arg} {
     } elseif {$ircd eq "2"} {      
         # -- IRCnet
         #irc.psychz.net 352 cori * _mxl ipv4.pl ircnet.hostsailor.com Maxell H :2 0PNH oskar@ipv4.pl
-        lassign $arg mynick ident host server nick away hopcount sid
-        set rname [lrange $arg 9 end]
+        # -- parse via the shared parser: the old lassign omitted the channel field, shifting every
+        # -- field by one (ident got the channel, nick got the server), and list-parsed the realname
+        set parsed [raw:parse:352 $arg]
+        if {$parsed eq ""} { debug 1 "\002userdb:raw:genwho:\002 malformed 352: $arg"; return; }
+        lassign $parsed mynick chan ident host server nick away hopcount sid rname
         # -- NOTE:  The above raw example doesn't appear to provide an actual IP;
         # --        A DNS lookup would slow us down; be doubled up from real scans; and isn't needed for autologin
         set ip 0;
@@ -15691,7 +16243,11 @@ proc userdb:deluser {user uid} {
     }    
 
     # -- deal with openai plugin
-    if {[info commands ask:query] ne ""} {
+    #if {[info commands ask:query] ne "" || [info commands arm:cmd:ask] ne ""} {
+    if {[info commands ask:query] ne "" || [info commands arm:cmd:ask] ne ""} {
+    set plugin(openai) 1
+    append setlist " openai image imagerand"
+}; # -- openai
         # -- openai plugin loaded
         #db:query "DELETE FROM openai WHERE user='$user'"
         #debug 3 "userdb:deluser: deleted openai entries from openai table (uid: $uid)"
@@ -15881,7 +16437,7 @@ proc userdb:cmd:time {0 1 2 3 {4 ""}  {5 ""}} {
         reply $type $target "$nick: time in $tz is $datetime"
 
         # -- create log entry
-        log:cmdlog BOT * $cid $user $uid [string toupper $cmd] "[join $arg]" "$source" "" "" ""
+        log:cmdlog BOT * $cid $user $uid [string toupper $cmd] "[string trim $arg]" "$source" "" "" ""
         return;
 
     } else { set tuser $ttuser }; # -- use the correct username case
@@ -15920,7 +16476,7 @@ proc userdb:cmd:time {0 1 2 3 {4 ""}  {5 ""}} {
     reply $type $target "\002time\002 for $tuser is \002$usertime\002 ($tz)"
 
     # -- create log entry
-    log:cmdlog BOT * $cid $user $uid [string toupper $cmd] "[join $arg]" "$source" "" "" ""
+    log:cmdlog BOT * $cid $user $uid [string toupper $cmd] "[string trim $arg]" "$source" "" "" ""
 
 }
 
@@ -16869,6 +17425,7 @@ proc ipqs:query {ip} {
     set url "$cfgurl/[cfg:get ipqs:key *]/$ip"
 
     debug 3 "\002ipqs:query:\002 querying url: $url"
+    set tok ""; # -- so a failed request leaves $tok defined
     catch {set tok [http::geturl $url -keepalive 1 -timeout 3000]} error
     # -- TODO: for some reason, this coroutine doesn't return
     #coroexec http::geturl $url -keepalive 1 -timeout 5000 -command [info coroutine]
@@ -16876,9 +17433,9 @@ proc ipqs:query {ip} {
     #set error ""; # -- TODO: fix generic error check
 
     debug 5 "ipqs: checking for errors...(tok: $tok -- error: $error)"
-    if {[string match -nocase "*couldn't open socket*" $error]} {
+    if {$tok eq "" || [string match -nocase "*couldn't open socket*" $error]} {
         debug 0 "\002ipqs:query:\002 could not open socket to: $url"
-        http::cleanup $tok
+        catch { http::cleanup $tok }
         return "-1 [list "unable to open socket"]"
     } 
     
@@ -16970,7 +17527,7 @@ proc ipqs:cmd:ipqs {0 1 2 3 {4 ""} {5 ""}} {
     reply $type $target "\002\[IPQS\]\002 \002ip:\002 $ip -- \002proxy:\002 $out(proxy) -- \002bot:\002 $out(bot_status) -- \002tor:\002 $out(tor) -- \002score:\002 $out(fraud_score) -- \002ASN:\002 $out(ASN) -- \002ISP:\002 $out(ISP)"
     
     # -- create log entry
-    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [join $arg] $source "" "" ""
+    log:cmdlog BOT $chan $cid $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
 }
 
 putlog "\[@\] Armour: loaded IPQS (www.ipqualityscore.com) support functions."
@@ -17779,6 +18336,7 @@ proc kick:chan {chan kicklist reason} {
     set cid [dict keys [dict filter $dbchans script {id dictData} { 
         expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
     }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
     foreach nick $kicklist {
         set nick [join $nick]
         if {![onchan $nick $chan] && [dict get $dbchans $cid mode] ne "secure"} { continue; }
@@ -17856,6 +18414,8 @@ proc mode:ban {chan banlist reason {duration "7d"} {level "100"} {notnext ""}} {
 
 # -- abstract to handle UNBANs via server or services
 proc mode:unban {chan unbanlist} {
+    # -- these bans are no longer pending: drop any restart records for them
+    foreach _m $unbanlist { catch { ban:forget $chan $_m } }
     if {$unbanlist eq ""} { 
         debug 0 "mode:unban: no nicks provided for UNBAN in $chan"
         return;
@@ -18187,7 +18747,7 @@ proc log:cmdlog {source chan chan_id user user_id cmd params bywho target target
 proc randpass {{length ""} {chars ")(*&^%$\#@!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz)(*&^%$\#@!"}} {
     variable cfg
     if {$length eq ""} { set length [cfg:get randpass *] }
-    set range [expr {[string length $chars]-1}]
+    set range [string length $chars];  # -- was length-1, so the last character was never chosen
     set text ""
     for {set i 0} {$i < $length} {incr i} {
        set pos [expr {int(rand()*$range)}]
@@ -18234,6 +18794,25 @@ proc proc:setvars {0 1 2 3 {4 ""} {5 ""}} {
     #debug 3 "\002proc:setvars\002: $0 $1 $2 $3 $4 $5"
     #debug 3 "\002proc:setvars\002: arg: $arg"
     return "$type $stype $target $starget $nick $uh $hand $source $chan [list $arg]"
+}
+
+# -- user text reaches command handlers as a raw string (see proc:setvars above).  parsing it as a
+# -- Tcl list throws on an unbalanced brace or quote, and silently rewrites backslashes, braces and
+# -- quotes.  these helpers split on whitespace instead and never interpret the text.
+
+# -- the nth whitespace-separated word (0-based), verbatim; "" if there is none
+proc arg:word {text n} {
+    return [lindex [regexp -all -inline {\S+} $text] $n]
+}
+
+# -- everything after the first n words, verbatim: inner spacing is kept, outer whitespace trimmed
+proc arg:tail {text n} {
+    set text [string trimleft $text]
+    for {set i 0} {$i < $n} {incr i} {
+        if {![regexp -indices -- {^\S+\s*} $text m]} { return "" }
+        set text [string range $text [expr {[lindex $m 1] + 1}] end]
+    }
+    return [string trim $text]
 }
 
 # -- coroutine debug
@@ -18525,6 +19104,7 @@ proc atopic:set {chan {topic ""}} {
     set cid [dict keys [dict filter $dbchans script {id dictData} { 
         expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
     }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
     if {$cid eq ""} { return; }; # -- chan not registered
     set autotopic [db:get value settings setting "autotopic" cid $cid]
     if {$autotopic eq "" || $autotopic eq "off"} { return; }; # -- autotopic not on
@@ -20071,6 +20651,7 @@ foreach chan [channels] {
     set cid [dict keys [dict filter $dbchans script {id dictData} { 
         expr {[string tolower [dict get $dictData chan]] eq [string tolower $chan]} 
     }]]
+        set cid [lindex $cid 0];  # -- dict keys returns a list; empty when the channel is not registered
     if {$cid eq ""} { lappend clist $chan }
 }
 set cfg(chan:login) "[join $clist]"
@@ -20089,8 +20670,27 @@ init:autologin
 namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
+
+# ------------------------------------------------------------------------------------------------
+# plugin loader -- must be done outside the arm namespace
+# ------------------------------------------------------------------------------------------------
+foreach plugin [array names arm::addplugin] {
+    lassign [array get arm::addplugin $plugin] name file
+    arm::debug 0 "Armour: loading plugin $name ... (file: $file)"
+    catch {source $file} error
+    if {$error ne ""} {
+        arm::debug 0 "\002(plugin load error)\002:$name\: $::errorInfo"
+    }
+}
+# ------------------------------------------------------------------------------------------------
+# -- NOTE: these checks were previously ABOVE the plugin loader.  They test for a plugin's procs to
+# -- decide whether to keep its commands, but nothing had been sourced at that point, so every
+# -- plugin-dependent command (ask, and, askmode, image, speak, joke, gif, score, seen, ...) was
+# -- unset regardless.  They run here instead, after the loader and before loadcmds.
+# -- (this region is already inside 'namespace eval arm', so the block must NOT be wrapped again)
+
 # -- disable commands if 'openai' plugin not loaded
-if {[info commands ask:query] eq ""} {
+    if {([info commands ask:query] eq "" && [info commands arm:cmd:ask] eq "")} {
     if {[info exists addcmd(ask)]} { unset addcmd(ask) }
     if {[info exists addcmd(and)]} { unset addcmd(and) }
     if {[info exists addcmd(askmode)]} { unset addcmd(askmode) }
@@ -20102,7 +20702,7 @@ if {[cfg:get ask:model] eq "perplexity"} {
 }
 
 # -- disable commands if 'image' not enabled or openai plugin not loaded
-if {!$cfg(ask:image) || [info commands ask:query] eq ""} {
+    if {!$cfg(ask:image) || ([info commands ask:query] eq "" && [info commands arm:cmd:ask] eq "")} {
     if {[info exists addcmd(image)]} { unset addcmd(image) }
 }
 
@@ -20151,18 +20751,6 @@ if {[info commands seen:cmd:seen] eq ""} {
     if {[info exists addcmd(seen)]} { unset addcmd(seen) }
 }
 
-# ------------------------------------------------------------------------------------------------
-# plugin loader -- must be done outside the arm namespace
-# ------------------------------------------------------------------------------------------------
-foreach plugin [array names arm::addplugin] {
-    lassign [array get arm::addplugin $plugin] name file
-    arm::debug 0 "Armour: loading plugin $name ... (file: $file)"
-    catch {source $file} error
-    if {$error ne ""} {
-        arm::debug 0 "\002(plugin load error)\002:$name\: $::errorInfo"
-    }
-}
-# ------------------------------------------------------------------------------------------------
 loadcmds; # -- load all commands (incl. plugins)
 # ------------------------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------------------------

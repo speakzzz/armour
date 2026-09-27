@@ -20,7 +20,7 @@
 #     cocktail <name>
 #
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
+namespace eval ::arm {
 # ------------------------------------------------------------------------------------------------
 
 package require json
@@ -182,6 +182,7 @@ proc ninjas:query {cmd {dict ""}} {
         set url "$url?$query"
     }
 
+    set tok ""; # -- so a failed request leaves $tok defined
     catch {set tok [http::geturl $url \
         -method GET \
         -headers [list "X-Api-Key" [cfg:get ninjas:key]] \
@@ -224,6 +225,9 @@ proc ninjas:query {cmd {dict ""}} {
 
 # -- abstraction to check for HTTP errors
 proc ninjas:errors {url tok error} {
+    # -- the request never returned a token (DNS failure, refused connection, TLS error):
+    # -- there is nothing to clean up or inspect, so report the error as-is
+    if {![info exists tok] || $tok eq ""} { return [list 1 [expr {$error ne "" ? $error : "request failed"}]] }
     debug 0 "\002ninja:errors:\002 checking for errors...(error: $error)"
     if {[string match -nocase "*couldn't open socket*" $error]} {
         debug 0 "\002ninjas:errors:\002 could not open socket to $url."

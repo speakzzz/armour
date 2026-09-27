@@ -10,7 +10,7 @@
 #   insult <nick> <reason>  - insult a nick
 #
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
+namespace eval ::arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- prerequisite packages
@@ -225,6 +225,9 @@ proc humour:http:query {type params} {
 
 # -- abstraction to check for HTTP errors
 proc humour:http:errors {url tok error} {
+    # -- the request never returned a token (DNS failure, refused connection, TLS error):
+    # -- there is nothing to clean up or inspect, so report the error as-is
+    if {![info exists tok] || $tok eq ""} { return [list 1 [expr {$error ne "" ? $error : "request failed"}]] }
     debug 0 "\002humour::http:errors:\002 checking for errors...(error: $error)"
     if {[string match -nocase "*couldn't open socket*" $error]} {
         debug 0 "\002humour::http:errors:\002 could not open socket to $url."

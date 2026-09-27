@@ -49,7 +49,23 @@
 
 
 # ------------------------------------------------------------------------------------------------
-namespace eval arm {
+namespace eval ::arm {
+
+# -- JSON string escaping.  normally provided by the openai plugin; defined here too so this
+# -- plugin works when loaded on its own.
+if {[info commands ask:jsonesc] eq ""} {
+    proc ask:jsonesc {str} {
+        set str [string map [list \\ {\\} \" {\"} / {\/}] $str]
+        set str [string map [list \n {\n} \r {\r} \t {\t} \b {\b} \f {\f}] $str]
+        set out ""
+        foreach ch [split $str ""] {
+            ::scan $ch %c code
+            if {$code < 32} { append out [format {\u%04x} $code] } else { append out $ch }
+        }
+        return $out
+    }
+}
+
 # ------------------------------------------------------------------------------------------------
 
 
@@ -64,8 +80,9 @@ package require json
 package require http 2
 package require tls 1.7
 
-bind cron - "0 * * * *" arm::ask:cron;          # -- hourly file cleanup cronjob, on the hour
-bind cron - "30 */3 * * *" arm::ask:cron:image; # -- cronjob every 3 hours at 30mins past the hours
+# -- note: ask:cron and ask:cron:image belong to the openai plugin, which binds them itself.
+# -- binding them here registered binds this plugin cannot satisfy (and double-bound them when
+# -- both plugins were loaded, running the cleanup twice an hour).
 
 bind pubm - "*" arm::sumlog:pubm
 
@@ -306,7 +323,7 @@ proc arm:cmd:summarise {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     set eresponse $response
-    regsub -all {"} $response {\"} eresponse; # -- escape quotes in response
+    set eresponse [ask:jsonesc $response]; # -- escape for JSON (quotes, backslashes, control characters)
     regsub -all {\{} $response {"} response; # -- fix curly braces
     regsub -all {\}} $response {"} response; # -- fix curly braces 
     
@@ -362,7 +379,7 @@ proc summarise:query {what cid uid key userprefix} {
 
     #debug 4 "summarise:query: what: $what"
     
-    regsub -all {"} $what {\\"} ewhat;           # -- escape quotes in question
+    set ewhat [ask:jsonesc $what]; # -- escape for JSON (quotes, backslashes, control characters)
     #regsub -all {<} $ewhat {\<} ewhat;           # -- escape lt
     #regsub -all {>} $ewhat {\>} ewhat;           # -- escape gt
     #regsub -all {\\n} $ewhat {\\\n} ewhat;       # -- retain newlines
@@ -387,16 +404,22 @@ proc summarise:query {what cid uid key userprefix} {
     append systemrole "$userprefix.\\n"
     if {$systemrole ne ""} {
         # -- add system role instruction
-        regsub -all {"} $systemrole {\\"} systemrole
+        set systemrole [ask:jsonesc $systemrole]; # -- escape for JSON (quotes, backslashes, control characters)
         set ask($key) "{\"role\": \"system\", \"content\": \"$systemrole\"}, {\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
     } else {
         set ask($key) "{\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
     }
 
-    set json "{\"model\": \"$model\", \"messages\": \[$ask($key)\], \"temperature\": [cfg:get ask:temp *]}"
+    # -- newer models reject a non-default temperature; ask:json omits it for them
+    if {[info commands ask:json] ne ""} {
+        set json [ask:json $model $ask($key) [cfg:get ask:temp *]]
+    } else {
+        set json "{\"model\": \"$model\", \"messages\": \[$ask($key)\], \"temperature\": [cfg:get ask:temp *]}"
+    }
 
     debug 3 "\002summarise:query:\002 POST JSON: $json"
 
+    set tok ""; # -- so a failed request leaves $tok defined
     catch {set tok [http::geturl $cfgurl \
         -method POST \
         -binary 1 \
@@ -436,6 +459,9 @@ proc summarise:query {what cid uid key userprefix} {
 
 # -- abstraction to check for HTTP errors
 proc summarise:errors {cfgurl tok error} {
+    # -- the request never returned a token (DNS failure, refused connection, TLS error):
+    # -- there is nothing to clean up or inspect, so report the error as-is
+    if {![info exists tok] || $tok eq ""} { return [list 1 [expr {$error ne "" ? $error : "request failed"}]] }
     debug 0 "\002ask:errors:\002 checking for errors...(error: $error)"
     if {[string match -nocase "*couldn't open socket*" $error]} {
         debug 0 "\002ask:errors:\002 could not open socket to $cfgurl."
