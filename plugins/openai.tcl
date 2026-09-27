@@ -309,7 +309,7 @@ proc arm:cmd:ask {0 1 2 3 {4 ""} {5 ""}} {
 
     ::arm::debug 3 "arm:cmd:ask: response: $response"
     set eresponse $response
-    regsub -all {"} $response {\"} eresponse; # -- escape quotes in response
+    set eresponse [ask:jsonesc $response]; # -- escape for JSON (quotes, backslashes, control characters)
     append ask($type,[split $nick],$chan) ", {\"role\": \"assistant\", \"content\": \"$eresponse\"}"
 
     regsub -all {\{} $response {"} response; # -- fix curly braces
@@ -420,7 +420,7 @@ proc arm:cmd:and {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # -- add response to conversation history
-    regsub -all {"} $response {\"} eresponse; # -- escape quotes
+    set eresponse [ask:jsonesc $response]; # -- escape for JSON (quotes, backslashes, control characters)
     append ask($type,[split $nick],$chan) ", {\"role\": \"assistant\", \"content\": \"$eresponse\"}"
     regsub -all {\{} $response {"} response; # -- fix curly braces
     regsub -all {\}} $response {"} response; # -- fix curly braces
@@ -926,7 +926,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 
         } elseif {$cmd eq "speak"} {
             # -- speak
-            regsub -all {"} $query {\\"} query; # -- escape quotes
+            set query [ask:jsonesc $query]; # -- escape for JSON (quotes, backslashes, control characters)
             set iserror [::arm::speak:query $query]
             if {[lindex $iserror 0] eq 1} { 
                 ::arm::reply $type $target "error: [lrange $iserror 1 end]"
@@ -942,7 +942,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 
         } elseif {$cmd eq "sing"} {
             # -- sing
-            regsub -all {"} $query {\\"} query; # -- escape quotes
+            set query [ask:jsonesc $query]; # -- escape for JSON (quotes, backslashes, control characters)
             ::arm::debug 0 "ask:abstract:cmd: sing: chan: $chan -- nick: $nick -- query: $query"
             set iserror [::arm::sing:ask $type $chan $cid $nick $user $target $query]
             if {[lindex $iserror 0] eq 1} { 
@@ -955,7 +955,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
 
         } elseif {$cmd eq "summarise"} {
             # -- sing
-            regsub -all {"} $query {\\"} query; # -- escape quotes
+            set query [ask:jsonesc $query]; # -- escape for JSON (quotes, backslashes, control characters)
             lassign [::arm::summarise:ask $type $chan $cid $nick $user $uid $target $query] iserror reply
             putlog "ask:abstract:cmd: summarise:ask iserror: $iserror -- reply: $reply"
             if {$iserror eq 1} { 
@@ -990,7 +990,7 @@ proc ask:abstract:cmd {cmd 0 1 2 3 {4 ""} {5 ""}} {
                 }
                 ::arm::debug 0 "ask:abstract:cmd: video: using image link: $link"
             }
-            regsub -all {"} $query {\\"} query; # -- escape quotes
+            set query [ask:jsonesc $query]; # -- escape for JSON (quotes, backslashes, control characters)
             set iserror [::arm::video:ask $type $chan $cid $nick $user $target $origquery $query $link]
             if {[lindex $iserror 0] eq 1} { 
                 ::arm::debug 0 "\002ask:abstract:cmd\002 video error: [lrange $iserror 1 end]"
@@ -1090,6 +1090,22 @@ proc arm:cmd:askmode {0 1 2 3 {4 ""}  {5 ""}} {
 # -- and reject the parameter outright:
 # --   openai error: Unsupported value: 'temperature' does not support 0.7 with this model.
 # -- so omit it for those, and for an empty ask:temp.  returns the JSON body for a chat request.
+# -- escape a string for use inside a JSON double-quoted value.
+# -- the plugin previously escaped only the double quote, so a backslash or a control character in
+# -- a question corrupted the request body (and could add fields to it).  order matters: the
+# -- backslash must be escaped first, or it would double-escape the sequences added after it.
+proc ask:jsonesc {str} {
+    set str [string map [list \\ {\\} \" {\"} / {\/}] $str]
+    set str [string map [list \n {\n} \r {\r} \t {\t} \b {\b} \f {\f}] $str]
+    # -- any remaining control character (U+0000-U+001F) must be sent as \u00XX
+    set out ""
+    foreach ch [split $str ""] {
+        ::scan $ch %c code
+        if {$code < 32} { append out [format {\u%04x} $code] } else { append out $ch }
+    }
+    return $out
+}
+
 proc ask:json {model messages temp} {
     if {$temp eq "" || [regexp -nocase {^(gpt-[5-9]|gpt-[1-9][0-9]|o[1-9])} $model]} {
         return "{\"model\": \"$model\", \"messages\": \[$messages\]}"
@@ -1124,7 +1140,7 @@ proc ask:query {what first ids key {speak "0"} {userprefix "1"}} {
 
     ::arm::debug 4 "ask:query: what: $what"
     
-    regsub -all {"} $what {\\"} ewhat;           # -- escape quotes in question
+    set ewhat [ask:jsonesc $what]; # -- escape for JSON (quotes, backslashes, control characters)
     #putlog "ask:query: ewhat: $ewhat"
     #set ewhat $what
     set ewhat [encoding convertto utf-8 $ewhat]; # -- convert to utf-8
@@ -1161,7 +1177,7 @@ proc ask:query {what first ids key {speak "0"} {userprefix "1"}} {
         set datehint "The current date is [clock format [clock seconds] -format {%A, %d %B %Y}]."
         if {$systemrole ne ""} { set systemrole "$systemrole $datehint" } else { set systemrole $datehint }
         # -- add system role instruction
-        regsub -all {"} $systemrole {\\"} systemrole
+        set systemrole [ask:jsonesc $systemrole]; # -- escape for JSON (quotes, backslashes, control characters)
         set ask($key) "{\"role\": \"system\", \"content\": \"$systemrole\"}, {\"role\": \"user\", \"content\": \"$mode $ewhat\"}"
 
     } else {
@@ -1219,7 +1235,7 @@ proc ask:dalle {desc {num "1"} {size "512x512"} {image ""}} {
     set token [::arm::cfg:get ask:token *]
     set timeout [expr [::arm::cfg:get ask:timeout *] * 1000]
 
-    regsub -all {"} $desc {\\"} desc; # -- escape quotes in query
+    set desc [ask:jsonesc $desc]; # -- escape for JSON (quotes, backslashes, control characters)
 
     set limited 0
 
