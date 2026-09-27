@@ -5,7 +5,7 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 201 tests across 19 suites at time of writing.
+code regresses. 230 tests across 24 suites at time of writing.
 
 Releases are listed newest first.
 
@@ -13,8 +13,47 @@ Releases are listed newest first.
 
 ## Unreleased
 
-Follow-up round: fixes for issues found while running the previous release, and
-the remaining hardening items.
+The openai plugin works as of the previous release; these make its answers
+correct and let it use a current model.
+
+### Fixed
+
+- **The model was never told the date.** A language model has no clock, so
+  `ask what year is it` answered from its training data ("It's 2023!"), and
+  changing `ask:model` made no difference. The system message now carries the
+  current date on every request, appended to the configured `cfg(ask:system)`
+  role — or sent on its own when none is set, which previously meant no system
+  message at all.
+
+- **`temperature` was sent to models that reject it.** The request always
+  included `"temperature": [cfg:get ask:temp]` (0.7 by default). The GPT-5
+  generation and the o-series accept only the default and refuse the parameter:
+
+      openai error: Unsupported value: 'temperature' does not support 0.7 with
+                    this model. Only the default (1) value is supported.
+
+  That made every newer model unusable — which matters, because those are the
+  ones with a recent knowledge cutoff (the GPT-5.6 family: February 2026, against
+  October 2023 for `gpt-4o` and `gpt-4o-mini`, which is why the bot still named
+  the previous US president). A new `ask:json` helper omits the parameter for
+  those models and for an empty `ask:temp`; older models are unaffected. Used by
+  both `openai.tcl` and `summarise.tcl`.
+
+### Upgrade notes
+
+- Knowing the date does not give the model knowledge of events after its training
+  cutoff. For current-events answers, set a model with a recent cutoff, e.g.
+  `conf ask:model gpt-5.6-luna` — which is also cheaper than `gpt-4o`. Check what
+  your account offers via the API's `/v1/models` listing before choosing.
+- `conf` writes to the Armour config file, so a model change survives a restart.
+
+---
+
+## Release — revision 2026092600
+
+Follow-up round: the openai plugin never worked (two separate causes, below),
+plus fixes for issues found while running the previous release and the
+remaining hardening items.
 
 ### Security
 
@@ -80,6 +119,36 @@ the remaining hardening items.
   the five `*:errors` handlers called `http::cleanup` on it as well. Fixed at all
   10 call sites and in every handler.
 
+- **Plugin procedures landed in the wrong namespace (`::arm::arm`).** The plugin
+  loader runs inside `::arm`, and six plugins opened with a *relative*
+  `namespace eval arm {`, which nests there — so every proc they defined became
+  `::arm::arm::ask:query` rather than `::arm::ask:query`. The plugin loads
+  without error and prints its banner (its debug calls are fully qualified and
+  resolve), but nothing can find its procs, so its commands are disabled,
+  `modchan` reports "the plugin must be loaded", and its cron binds fire into
+  undefined commands every hour (`invalid command name "::arm::ask:cron"`).
+  Fixed in `aidle`, `humour`, `ninjas`, `openai`, `speak` and `summarise` by
+  declaring `namespace eval ::arm {`. Plugins that declare no namespace at all
+  (`seen`, `quote`, `weather`, `tell`, `polls`) were never affected.
+
+- **Plugin-dependent commands were stripped before their plugin loaded.**
+  `armour.tcl` removes `addcmd` entries whose plugin is absent, deciding by
+  looking for the plugin's procs — but those checks ran ~65 lines *above* the
+  plugin loader, when nothing had been sourced yet. So `ask`, `and`, `askmode`,
+  `image`, `speak`, `joke`, `gif`, `score` and `seen` were unset on every start
+  regardless. The symptom: the plugin loads and its procs exist, yet the command
+  does nothing and `array get arm::addcmd ask` is empty while neighbouring
+  entries are present. The block now runs after the loader, immediately before
+  `loadcmds`.
+
+- **Stale binds from unloaded plugins.** eggdrop keeps binds in the interpreter,
+  so a bind registered by a plugin outlives that plugin across a rehash and
+  fires forever against a command that no longer exists. `binds:sweep` now runs
+  120 seconds after load and unbinds any whose target is undefined, logging each
+  one. `summarise.tcl` also bound `ask:cron`/`ask:cron:image` (copied from
+  `openai.tcl`) without defining them — removed; with both plugins loaded they
+  were bound twice, running the cleanup twice an hour.
+
 - **`dbchans` corrupted by a mode change on an unregistered channel.** Seen as
   `key "chan" not known in dictionary` from an unrelated consumer (the `seen`
   plugin, on an ordinary `+o`). `mode:add:D`, `mode:rem:D` and `flud:lock` take
@@ -128,6 +197,9 @@ the remaining hardening items.
   the bot was down.
 - Review existing list entries for bogus methods (`view <id>`); anything outside
   the supported set never matched anything.
+- The openai plugin (and `speak`, `humour`, `ninjas`, `summarise`, `aidle`) can
+  now actually be used. Each still needs its `addplugin` line, its `addcmd`
+  lines, its `cfg(...)` settings, and — for openai — `modchan <chan> openai on`.
 
 ---
 
