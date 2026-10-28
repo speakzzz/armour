@@ -5,13 +5,93 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 230 tests across 24 suites at time of writing.
+code regresses. 259 tests across 25 suites at time of writing.
 
 Releases are listed newest first.
 
 ---
 
-## Unreleased
+## Release — revision 2026102800
+
+### Added
+
+- **`add dronebl` takes the submission class.** It always submitted with
+  `cfg(dronebl:type)`, and nothing typed on the command line could change it:
+  the class was read from the config at submit time, and everything after the
+  value became the comment — which DroneBL submissions then discarded unused.
+  So `add dronebl ip 1.2.3.4 19` submitted as type 17 and dropped the 19
+  silently. `rem` and `view` already accepted an optional trailing class, and
+  `::dronebl::submit` already honours a leading integer, so `add` was the only
+  one of the three throwing the capability away. The syntax is now
+
+      add ?chan? <dronebl|ircbl> <host|ip|last> <value1,value2..> [type] [comment]
+
+  A number in that position is the class for that submission only; anything
+  else is the comment, as before, so existing commands keep working. The
+  success reply names the class it used. Resolution is one shared proc,
+  `rbl:type`, rather than three inline copies of the same fallback.
+
+  Per-channel classes remain impossible: `cfg:get` ignores its `$chan` argument
+  for everything except `chan:method`, so `cfg(dronebl:type)` is one global
+  value. To change the default permanently, `conf dronebl:type <n>` — which
+  writes to the config file and so survives a restart.
+
+- `help/add.help`, `help/rem.help` and `help/view.help` documented none of the
+  DroneBL/IRCBL forms. They do now.
+
+### Security
+
+- **`add dronebl` did not read its own access gate.** `candronebl` and
+  `canircbl` are computed from `cfg(dronebl:lvl)` / `cfg(ircbl:lvl)` and then
+  were never consulted in the RBL branch, so any user allowed to run `add`
+  could submit with the bot's DroneBL RPC key regardless of level. The config
+  warns that "you are responsible for DroneBL submissions with this key —
+  allocate access with care". The level is now enforced, and access to one list
+  is not access to the other.
+
+### Fixed
+
+- **`view dronebl <ip>` could never work.** It tested `$value` and `$method`,
+  which `arm:cmd:view` never sets, so every invocation threw
+  `can't read "value": no such variable` on a live bot. Had that read not
+  thrown, the guard below it tested `$method` against `"ip"`/`"host"` — a
+  method argument `view` has no syntax for — so the loop would have rejected
+  every address anyway. It also hardcoded `[lindex $arg 1]` as the address, so
+  `view #chan dronebl <ip>` looked up the word "dronebl". The branch now reads
+  its address and class from the argument positions it actually has.
+
+- **`rem`'s DroneBL guard never fired.** The no-access branch set `norbl`,
+  while the check below reads `nodronebl`, which stayed 0 — so with libdronebl
+  absent the command fell through and called `::dronebl::lookup` on a namespace
+  that does not exist. Same mistake as the `canircrbl` typo in `add`, which
+  left `canircbl` at 0 and the usage text wrong. Both fixed, plus a guard so
+  holding IRCBL access does not let a DroneBL removal through.
+
+- **The hostname path in `add`, `rem` and `view` was dead code.** The guard read
+  `![isValidIP $ip] && {set ip [dns:lookup $ip]} eq "error"`, where
+  `{set ip [dns:lookup $ip]}` is a braced *string* and never equals `"error"`.
+  The assignment never ran, so a hostname was never resolved and the clause was
+  always false. DroneBL survived it because `::dronebl::submit` resolves
+  internally; `ircbl:query` received the unresolved hostname. The lookup now
+  happens, and its result must be a valid IP, so a name that does not resolve
+  is rejected rather than submitted.
+
+- `add`'s comment index was fixed at 3 regardless of the optional channel
+  argument, so `add #dallas dronebl ip 1.2.3.4 drone detected` stored the IP
+  itself as the start of the comment.
+
+### Upgrade notes
+
+- If any account below `cfg(dronebl:lvl)` (default 500) has been relying on
+  `add dronebl`, it will now be refused. Raise that account's level or lower
+  `dronebl:lvl` deliberately.
+- A hostname that does not resolve is now rejected by `add`/`rem`/`view`
+  instead of being passed through. This is the intended behaviour of the
+  original guard.
+
+---
+
+## Release — revision 2026092700
 
 The openai plugin works as of the previous release; these make its answers
 correct and let it use a current model.
@@ -424,5 +504,5 @@ These remain open as of the Unreleased section above:
 - Updates have no signature/checksum verification.
 - Unbounded growth of some per-nick state arrays; no RFC-1459 casemapping; the
   ircu `raw:who` (354) parser has the same list-parsing issue as 352; the
-  bundled `openai` plugin has JSON-escaping and SSRF issues (dormant unless
+  bundled `openai` plugin's `image` command has an SSRF issue (dormant unless
   loaded).
