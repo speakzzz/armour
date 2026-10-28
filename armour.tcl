@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026102800"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026102802"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -3639,16 +3639,21 @@ proc bot:recv:port {bot cmd text} {
     variable data:kicks;    # -- stores list of recently kicked nicknames for a channel (by chan)
     variable data:chanban;  # -- state: tracks recently banned masks for a channel (by 'chan,mask')
     
-    lassign $text nick ident host ip host chan;  # -- target and chan can be '0' if manual scan
-    set openports [lrange $text 4 end]
-    
+    # -- wire format, from the putbot in bot:send:port:
+    #      recv:port <nick> <ident> <host> <ip> <chan> <openports...>
+    #    this used to lassign a second "host" between ip and chan, which shifted chan onto the
+    #    first open port, and then took openports from index 4 (the chan) rather than 5.
+    lassign $text nick ident host ip chan;  # -- nick and chan can be '0' if manual scan
+    set openports [lrange $text 5 end]
+
     if {$openports eq "NULL"} { return; }
 
     debug 1 "bot:recv:port: insecure host (host: $host ip: $ip openports: $openports)"
 
     if {$chan != 0} {
-        set nick [lindex [split $target !] 0]
-        
+        # -- $target was never set; the nick arrives in its own field
+        set target "$nick!$ident@$host"
+
         set mask1 "*!*@$host"
         set mask2 "*!~*@$host"
         set mask3 "*!$ident@$host"
@@ -3699,17 +3704,20 @@ proc bot:recv:dnsbl {bot cmd text} {
 
     debug 3 "bot:recv:dnsbl: dnsbl data: $data"
             
+    # -- $nuh and $target were never set, so both of these threw; the nick, ident and host arrive
+    # -- in their own fields, so build the mask from them
+    set nuh "$nick!$ident@$host"
+    set target $nuh
     debug 1 "bot:recv:dnsbl: dnsbl match found for $nuh: $response"
     debug 1 "scan: ------------------------------------------------------------------------------------"
-    set nick [lindex [split $target !] 0]
     set mask1 "*!*@$host"
     set mask2 "*!~*@$host"
-    set mask3 "*!$ident$host"
-    
+    set mask3 "*!$ident@$host";  # -- the @ was missing, so this mask never matched anything
+
     # -- don't continue if nick was recently caught by floodnet detection, or otherwise banned
     if {$nick in [get:val data:kicks $chan]} {
         debug 2 "bot:recv:dnsbl: $nick exists in $chan kick list data:kicks($chan), halting."
-        returnl
+        return;
     }
     
     foreach mask "$mask1 $mask2 $mask3" {
@@ -3749,7 +3757,16 @@ proc bot:send:dnsbl {bot cmd text} {
     global arm
     # debug 1 "bot:send:dnsbl: started. cmd: $cmd text: $text"
     set start [clock clicks]
-    lassign $text nick ident host ip chan
+    # -- wire format, from the putbot in the scanner:
+    #      scan:dnsbl <ip> <host> <nick> <ident> <host> <chan>
+    #    this used to lassign it as "nick ident host ip chan", which put the ident in $ip and so
+    #    scored the wrong thing, and dropped the channel entirely.  the host is sent twice; field
+    #    4 is the duplicate.
+    set ip    [lindex $text 0]
+    set host  [lindex $text 1]
+    set nick  [lindex $text 2]
+    set ident [lindex $text 3]
+    set chan  [lindex $text 5]
 
     debug 1 "bot:send:dnsbl: (from: $bot) -- scanning for dnsbl match: $ip (host: $host)"
     # -- get score
@@ -4062,9 +4079,11 @@ proc kickban {nick ident host chan duration reason {id ""}} {
         }
     }
 
-    # -- store the most recently banned mask for this entry ID
+    # -- store the most recently banned mask for this entry ID.  this used to write to a local
+    # -- array named idban, discarded when the proc returned, so the namespace array declared
+    # -- above stayed empty and rem's "lift the ban this entry placed" path never fired.
     if {$id ne ""} {
-        set idban($chan,$id) $mask
+        set data:idban($chan,$id) $mask
     }
 
     if {![info exists data:chanban($chan,$mask)]} {
@@ -5687,7 +5706,10 @@ proc arm:cmd:country {0 1 2 3 {4 ""} {5 ""}} {
     lassign [proc:setvars $0 $1 $2 $3 $4 $5] type stype target starget nick uh hand source chan arg 
     
     set cmd "country"
-    
+    # -- every other command proc does this; country did not, so the log:cmdlog call at the end
+    # -- read $user and $uid unset and threw: can't read "user": no such variable
+    lassign [db:get id,user users curnick $nick] uid user
+
     # -- ensure user has required access for command
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     set log "$chan [string trim $arg]"; set log [string trimright $log " "]
@@ -6836,7 +6858,11 @@ proc add:matchusers {chan method value} {
 
 # -- existing entries of the OTHER list-type whose value overlaps a new $method/$value on $chan
 # -- (a white host that a black host also covers, or vice versa).  Advisory only.
-# -- returns a list of "id (type value)" strings, capped by the caller.
+# -- an entry is only relevant if it can actually act on $chan: the same channel, a global (*)
+# -- entry, or any channel when the new entry is itself global.  This scoping was missing: the
+# -- entry's channel was read into a variable and then never compared, so the note listed
+# -- overlapping entries from every channel the bot knows, without saying which.
+# -- returns a list of "id (type value on chan)" strings, capped by the caller.
 proc add:conflicts {chan method value newtype} {
     set out [list]
     set other [expr {$newtype eq "white" ? "black" : "white"}]
@@ -6844,11 +6870,12 @@ proc add:conflicts {chan method value newtype} {
         dict for {id d} $::arm::entries {
             if {[dict get $d type] ne $other} { continue }
             if {[dict get $d method] ne $method} { continue }
-            set ec [dict get $d cid]
+            set ec [dict get $d chan]
+            if {$ec ne "*" && $chan ne "*" && ![string equal -nocase $ec $chan]} { continue }
             set ev [dict get $d value]
             # -- overlap if either glob covers the other (string match is symmetric enough for a hint)
             if {[string match -nocase $value $ev] || [string match -nocase $ev $value]} {
-                lappend out "$id ($other $ev)"
+                lappend out "$id ($other $ev on $ec)"
             }
         }
     }
@@ -7418,7 +7445,9 @@ proc arm:cmd:rem {0 1 2 3 {4 ""} {5 ""}} {
                 set mask ""; set bantype ""
                 if {[info exists data:idban($chan,$id)]} {
                     set bantype " host"
-                    set mask $idban($chan,$id); # -- banmask of user last banned with this ID
+                    # -- banmask of the user last banned with this ID.  the array name contains a
+                    # -- colon, so it is read with [set ...] rather than $data:idban(...)
+                    set mask [set data:idban($chan,$id)]
                 } elseif {$method eq "host"} {
                     set bantype " host"
                     if {[regexp -- {\*} $value]} { set mask $value } else { set mask "*!*@$value" }
@@ -7433,6 +7462,9 @@ proc arm:cmd:rem {0 1 2 3 {4 ""} {5 ""}} {
                     mode:unban $chan "$mask"
                 }
             }
+            # -- the entry is gone, so its remembered banmask is dead weight: nothing else reads
+            # -- data:idban for a removed id, and it would otherwise accumulate forever
+            catch {unset data:idban($chan,$id)}
     
             debug 1 "arm:cmd:rem: removed $list $method entry: $value -- action: $action -- reason: $reason"
             
@@ -7622,14 +7654,11 @@ proc arm:cmd:mod {0 1 2 3 {4 ""} {5 ""}} {
         set method [dict get $entries $id method]
         set value [dict get $entries $id value]
         set flags [dict get $entries $id flags]
-        set limit [dict get $entries $id limit]
-        set action [dict get $entries $id action]
-        set hitnum [dict get $entries $id hits]
-        set depends [dict get $entries $id depends] 
-        set reason [dict get $entries $id reason]
-        set action [list:action $id]; # -- convert to action string
-        set reason [dict get $entries $id depends]
-                    
+        # -- limit, action, hits, depends and reason used to be fetched here and never read.  the
+        # -- last two lines also set reason from the entry's reason and then immediately replaced
+        # -- it with the entry's depends, so anything later added that read $reason would have
+        # -- silently got the dependency list instead.  Each value is fetched where it is used.
+
         if {$ltype eq "white"} { set list "whitelist" } else { set list "blacklist" }
         
         debug 4 "\002cmd:mod:\002 chan: $tchan -- id: $id -- list: $ltype -- method: $method -- value: $value -- param: $param -- setval: $setval"
@@ -7799,7 +7828,7 @@ proc arm:cmd:showlog {0 1 2 3 {4 ""} {5 ""}} {
     
     if {$arg eq ""} { reply $type $target "usage: showlog ?chan? \[-cmd <cmd>\] \[-days n\] \[-user <user>\] \[-max n\] \[-last n\]"; return; }
     
-    set flag_cmd false; set flag_days false; set flag_user false; set flag_max false;
+    set flag_cmd false; set flag_days false; set flag_user false;
     set usage false; set where false;
     set query "SELECT timestamp, user, user_id, command, params, bywho, target, target_xuser, wait FROM cmdlog"
     if {[string index [lindex $arg 0] 0] eq "#"} {
@@ -7836,7 +7865,9 @@ proc arm:cmd:showlog {0 1 2 3 {4 ""} {5 ""}} {
         } elseif {$i eq "-max" || $i eq "-last"} {
             set max [lindex $text [expr $c + 1]]
             if {$max eq "0" || ![string is digit $max]} { reply $type $target "invalid max (1-5)."; return; }
-            if {[string index $cmd 0] eq "-" } { set usage true; } else { set flag_max true; }
+            # -- unlike -cmd/-days/-user, -max needs no bookkeeping flag: $max is read directly
+            # -- where the results are printed, and the flag this used to set was never read.
+            if {[string index $cmd 0] eq "-" } { set usage true; }
             if {$max > 5} { reply $type $target "maximum of 5 results."; return; }
         }
         incr c

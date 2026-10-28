@@ -5,7 +5,7 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 259 tests across 25 suites at time of writing.
+code regresses. 291 tests across 26 suites at time of writing.
 
 Releases are listed newest first.
 
@@ -88,6 +88,134 @@ Releases are listed newest first.
 - A hostname that does not resolve is now rejected by `add`/`rem`/`view`
   instead of being passed through. This is the intended behaviour of the
   original guard.
+
+---
+
+## Release — revision 2026092700
+
+### Added
+
+- **`add dronebl` takes the submission class.** It always submitted with
+  `cfg(dronebl:type)`, and nothing typed on the command line could change it:
+  the class was read from the config at submit time, and everything after the
+  value became the comment — which DroneBL submissions then discarded unused.
+  So `add dronebl ip 1.2.3.4 19` submitted as type 17 and dropped the 19
+  silently. `rem` and `view` already accepted an optional trailing class, and
+  `::dronebl::submit` already honours a leading integer, so `add` was the only
+  one of the three throwing the capability away. The syntax is now
+
+      add ?chan? <dronebl|ircbl> <host|ip|last> <value1,value2..> [type] [comment]
+
+  A number in that position is the class for that submission only; anything
+  else is the comment, as before, so existing commands keep working. The
+  success reply names the class it used. Resolution is one shared proc,
+  `rbl:type`, rather than three inline copies of the same fallback.
+
+  Per-channel classes remain impossible: `cfg:get` ignores its `$chan` argument
+  for everything except `chan:method`, so `cfg(dronebl:type)` is one global
+  value. To change the default permanently, `conf dronebl:type <n>` — which
+  writes to the config file and so survives a restart.
+
+- `help/add.help`, `help/rem.help` and `help/view.help` documented none of the
+  DroneBL/IRCBL forms. They do now.
+
+### Security
+
+- **`add dronebl` did not read its own access gate.** `candronebl` and
+  `canircbl` are computed from `cfg(dronebl:lvl)` / `cfg(ircbl:lvl)` and then
+  were never consulted in the RBL branch, so any user allowed to run `add`
+  could submit with the bot's DroneBL RPC key regardless of level. The config
+  warns that "you are responsible for DroneBL submissions with this key —
+  allocate access with care". The level is now enforced, and access to one list
+  is not access to the other.
+
+### Fixed
+
+- **`view dronebl <ip>` could never work.** It tested `$value` and `$method`,
+  which `arm:cmd:view` never sets, so every invocation threw
+  `can't read "value": no such variable` on a live bot. Had that read not
+  thrown, the guard below it tested `$method` against `"ip"`/`"host"` — a
+  method argument `view` has no syntax for — so the loop would have rejected
+  every address anyway. It also hardcoded `[lindex $arg 1]` as the address, so
+  `view #chan dronebl <ip>` looked up the word "dronebl". The branch now reads
+  its address and class from the argument positions it actually has.
+
+- **`rem`'s DroneBL guard never fired.** The no-access branch set `norbl`,
+  while the check below reads `nodronebl`, which stayed 0 — so with libdronebl
+  absent the command fell through and called `::dronebl::lookup` on a namespace
+  that does not exist. Same mistake as the `canircrbl` typo in `add`, which
+  left `canircbl` at 0 and the usage text wrong. Both fixed, plus a guard so
+  holding IRCBL access does not let a DroneBL removal through.
+
+- **The hostname path in `add`, `rem` and `view` was dead code.** The guard read
+  `![isValidIP $ip] && {set ip [dns:lookup $ip]} eq "error"`, where
+  `{set ip [dns:lookup $ip]}` is a braced *string* and never equals `"error"`.
+  The assignment never ran, so a hostname was never resolved and the clause was
+  always false. DroneBL survived it because `::dronebl::submit` resolves
+  internally; `ircbl:query` received the unresolved hostname. The lookup now
+  happens, and its result must be a valid IP, so a name that does not resolve
+  is rejected rather than submitted.
+
+- `add`'s comment index was fixed at 3 regardless of the optional channel
+  argument, so `add #dallas dronebl ip 1.2.3.4 drone detected` stored the IP
+  itself as the start of the comment.
+
+A static pass over `armour.tcl` — variables read in a procedure that nothing in
+it binds, and assignments whose value is never read — turned up five more of the
+same kind of fault that made `view dronebl` throw:
+
+- **`country <ip>` threw on every use.** `arm:cmd:country` is the only command
+  procedure in the file that never does
+  `lassign [db:get id,user users curnick $nick] uid user`, yet it ends with
+  `log:cmdlog BOT * 1 $user $uid ...`. The geo answer was sent, then the command
+  died with `can't read "user": no such variable` and was never logged.
+
+- **The bot-to-bot scan relay could not work in either direction.**
+  `bot:send:dnsbl` parsed the request in the wrong field order: the scanner
+  sends `scan:dnsbl <ip> <host> <nick> <ident> <host> <chan>` and the procedure
+  did `lassign $text nick ident host ip chan`, so `$ip` held the ident — and was
+  then handed to `rbl:score` — while the real channel was dropped.
+  `bot:recv:port` lassigned a second `host` between `ip` and `chan`, so `$chan`
+  became the first open port number, and the port list then started on the
+  channel. `bot:recv:dnsbl` read `$nuh` and `$target`, neither of which it sets,
+  had an ident mask missing its `@`, and ended a guard in `returnl`, which is
+  not a command. These are `bind bot` handlers for distributed scanning, inert
+  unless bots relay scans to each other, which is presumably why it went
+  unnoticed.
+
+- **`data:idban` was never written.** `kickban` declares `variable data:idban`
+  and then writes `set idban($chan,$id) $mask` — a local array, discarded on
+  return. `arm:cmd:rem` tests `info exists data:idban($chan,$id)`, which was
+  therefore always false, so removing a whitelist entry never lifted the ban
+  that entry had placed. The key is now also unset once the entry is gone, so
+  the array cannot grow without bound.
+
+- **`add:conflicts` ignored the channel it was given** (introduced in the
+  previous release). It read the entry's channel into a variable and never
+  compared it, so the "overlaps existing …" note listed matching entries from
+  every channel the bot knows, with no indication of which. It now reports an
+  entry only when that entry can act on the target channel — same channel, a
+  global (`*`) entry, or any channel when the new entry is itself global — and
+  names the channel in the note.
+
+- Two dead-value cleanups with no behaviour change: `arm:cmd:mod` fetched
+  `limit`, `action`, `hits`, `depends` and `reason` out of the entries dict and
+  read none of them, and set `reason` from the entry's reason before immediately
+  replacing it with the entry's `depends`; `arm:cmd:showlog` set a `flag_max`
+  that nothing read (`-max` works through `$max`, unaffected). The remaining
+  ~100 never-read assignments are left alone.
+
+### Upgrade notes
+
+- If any account below `cfg(dronebl:lvl)` (default 500) has been relying on
+  `add dronebl`, it will now be refused. Raise that account's level or lower
+  `dronebl:lvl` deliberately.
+- A hostname that does not resolve is now rejected by `add`/`rem`/`view`
+  instead of being passed through. This is the intended behaviour of the
+  original guard.
+- `rem <id>` on a whitelist entry now really does lift the ban that entry
+  placed, which it has never done before. If you relied on the ban surviving
+  the entry's removal, it no longer will.
 
 ---
 
@@ -492,9 +620,16 @@ remaining hardening items.
 
 These remain open as of the Unreleased section above:
 
-- `cfg(ircbl:net)` is referenced by the IRCBL *delete* query but is not defined
-  anywhere, so with `cfg(ircbl)` enabled a removal logs a "setting not found"
-  config error and sends an empty network field. Dormant while IRCBL is off.
+- **IRCBL support is not implemented.** `ircbl:query` is called in three places
+  — `add ircbl`, `rem ircbl`, and the scan/ban path — but is defined nowhere in
+  the tree, so each call raises `invalid command name "ircbl:query"`. The third
+  site is the one that matters: it is reached through the per-entry `ircbl` flag
+  (`mod <id> ircbl on`, or `rbl on`), not through `cfg(ircbl)`, so setting that
+  flag on any blacklist entry makes every subsequent ban from it throw after the
+  kickban. The two manual sites also disagree on arity with each other.
+  Separately, `cfg(ircbl:net)` is referenced by the IRCBL delete query and is not
+  defined either. Either implement the feature or fence off all three call sites
+  and the `mod` flag; until then, do not set the `ircbl` entry flag.
 
 - **TLS certificate verification is not enabled** on any HTTPS connection,
   including the GitHub-based updater. Traffic interception could deliver
