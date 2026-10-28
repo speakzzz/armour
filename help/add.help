@@ -4,3 +4,5 @@ types can be: user (csc username), host (hostname, mask, ip address, cidr notati
 whitelist actions: accept (exempt from further scans), voice (voice user), op (op user).  blacklist action: ban (kickban user).  all type values support wildcard masks (? is any one value, * is any value zero times or more)
 when adding a 'user' type, auto conversion from nickname to network account will be done if value is specified in =nick format.
 ?joins:secs:hold? is optional and only applies to host or regex blacklist entries.  This value applies cumulative floodnet join triggers on N joins in X seconds, holding trigger window open for a further Y seconds.
+%B%dronebl / ircbl:%B% add ?chan? <dronebl|ircbl> <host|ip|last> <value1,value2..> [type] [comment]
+submits to the RBL instead of a bot list.  [type] is the numeric class; omit it to use cfg(dronebl:type) or cfg(ircbl:type).  a non-numeric word in that position is read as the comment, as before.  requires cfg(dronebl:lvl) / cfg(ircbl:lvl).

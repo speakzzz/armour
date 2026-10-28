@@ -1,2 +1,4 @@
 %B%command:%B% view -- %B%level:%B% %LEVEL% -- %B%usage:%B% view <id>
 views a whitelist or blacklist entry by ID.  If ID is unknown, use 'search' command.
+%B%dronebl:%B% view ?chan? dronebl <host|ip> [type]
+looks an IP up in DroneBL and reports any matching entries.  requires cfg(dronebl:lvl).

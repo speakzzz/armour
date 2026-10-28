@@ -6678,9 +6678,19 @@ proc arm:cmd:status {0 1 2 3 {4 ""} {5 ""}} {
 }
 
 
+# -- resolve the RBL class (DroneBL/IRCBL "type") for a submission, lookup or removal.
+# -- an explicit numeric class given on the command line wins; otherwise the configured default
+# -- for that list is used.  A non-numeric word is not a class (it is the start of a comment),
+# -- so it falls through to the default.  Returns "" for an unknown list.
+proc rbl:type {list {given ""} {chan ""}} {
+    if {$list ni {dronebl ircbl}} { return "" }
+    if {[regexp -- {^\d+$} $given]} { return $given }
+    return [cfg:get ${list}:type $chan]
+}
+
 # -- command: view
 # views a white or blacklist entry
-# usage: view ?chan? <dronebl|id> ?<host|ip>?
+# usage: view ?chan? <dronebl|id> ?<host|ip>? ?type?
 proc arm:cmd:view {0 1 2 3 {4 ""} {5 ""}} {
     variable cfg    
     variable entries; # -- dict: blacklist and whitelist entries
@@ -6693,9 +6703,10 @@ proc arm:cmd:view {0 1 2 3 {4 ""} {5 ""}} {
     
     # -- deal with the optional channel argument
     set first [lindex $arg 0];
+    set ischan 0
     if {[string index $first 0] eq "#" || [string index $first 0] eq "*"} {
         # -- chan (or global) provided
-        set chan $first; set ids [lindex $arg 1]
+        set ischan 1; set chan $first; set ids [lindex $arg 1]
     } else {
         # -- chan not provided
         set ids [lindex $arg 0];
@@ -6727,23 +6738,26 @@ proc arm:cmd:view {0 1 2 3 {4 ""} {5 ""}} {
         # -- check if libdronebl loaded & user has access
         if {[info command ::dronebl::submit] eq "" || [userdb:get:level $user $chan] < [cfg:get dronebl:lvl $chan]} {
             reply $stype $starget "\002usage:\002 view ?chan? <id>"
-            return; 
-        } else {
-            if {$value eq "" || $method eq ""} {
-                reply $stype $starget "\002usage:\002 view dronebl <host|ip>"
-                return;             
-            }
+            return;
         }
 
-        set loop [split [lindex $arg 1] ,]        
-        set ttype [lindex $arg 2]
+        # -- the value (and the optional class after it) sit one word later when a chan was given
+        set vbase [expr {$ischan ? 2 : 1}]
+        set vals [lindex $arg $vbase]
+        set given [lindex $arg [expr {$vbase + 1}]]
+        if {$vals eq ""} {
+            reply $stype $starget "\002usage:\002 view ?chan? dronebl <host|ip> \[type\]"
+            return;
+        }
+
+        set loop [split $vals ,]
         # -- allow comma delimited
         foreach ip $loop {
-            if {$ip eq "" || (![isValidIP $ip] && {set ip [dns:lookup $ip]} eq "error") || ($method ne "ip" && $method ne "host")} {
-                reply $stype $starget "\002usage:\002 view dronebl <host|ip> \[type\]"
-                continue;       
+            if {$ip eq "" || (![isValidIP $ip] && ![isValidIP [set ip [lindex [dns:lookup $ip] 0]]])} {
+                reply $stype $starget "\002usage:\002 view ?chan? dronebl <host|ip> \[type\]"
+                continue;
             }
-            if {$ttype eq "" || ![regexp -- {^\d+$} $ttype]} { set ttype [cfg:get dronebl:type $chan] }
+            set ttype [rbl:type dronebl $given $chan]
             # -- check if entry even exists
             set result [::dronebl::lookup $ip]  
             debug 2 "arm:cmd:view: dronebl result: $result"
@@ -6971,7 +6985,9 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
     } else { set xtra2 " \[reason\]" }
 
     if {[cfg:get ircbl $chan] && $globlevel >= [cfg:get ircbl:lvl $chan]} {
-        set canircrbl 1; set canrbl 1; append xtra1 "|ircbl"; set xtra2 " \[reason|comment\]"
+        # -- this used to assign to a misspelled name, so canircbl stayed 0: the usage text was
+        # -- wrong and nothing could tell whether the user had IRCBL access
+        set canircbl 1; set canrbl 1; append xtra1 "|ircbl"; set xtra2 " \[reason|comment\]"
     } else { set xtra2 " \[reason\]" }
 
     set syntax "\002usage:\002 add ?chan? <white|black${xtra1}> <user|host|rname|regex|text|country|asn|chan|last> <value1,value2..> <accept|voice|op|ban> ?joins:secs:hold? $xtra2"
@@ -7002,17 +7018,30 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
         }
         # --- END OF NEW CHECK ---
 
+        # -- candronebl/canircbl carry the dronebl:lvl / ircbl:lvl check.  Nothing read them here,
+        # -- so any user allowed to run `add` could submit with the bot's DroneBL RPC key.
+        if {($list eq "dronebl" && !$candronebl) || ($list eq "ircbl" && !$canircbl)} {
+            reply $stype $starget "\002error:\002 you do not have access to $list submissions."
+            return;
+        }
+
         if {$value eq "" || $method eq ""} {
             if {$canrbl} {
-                reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[comment\]"
-                return;  
+                reply $stype $starget "\002usage:\002 add ?chan? $list <host|ip|last> <value1,value2..> \[type\] \[comment\]"
+                return;
             } else {
                 reply $stype $starget $syntax
                 return;
             }
         }
 
-        set comment [arg:tail $arg 3]
+        # -- an optional numeric class may follow the value, overriding cfg($list:type) for this
+        # -- submission only.  Anything non-numeric there is the start of the comment, as before.
+        # -- the index shifts by one when the optional chan argument was given.
+        set rbln [expr {$ischan ? 4 : 3}]
+        set given [arg:word $arg $rbln]
+        if {[regexp -- {^\d+$} $given]} { incr rbln } else { set given "" }
+        set comment [arg:tail $arg $rbln]
 
         if {$method eq "last"} {
             if {![info exists data:lasthosts($chan)]} { reply $type $target "error: no hosts in memory."; return; }
@@ -7022,23 +7051,23 @@ proc arm:cmd:add {0 1 2 3 {4 ""} {5 ""}} {
             set loop [split $value ,]
         }
         foreach ip $loop {
-            if {$ip eq "" || (![isValidIP $ip] && {set ip [dns:lookup $ip]} eq "error") || ($method ne "ip" && $method ne "host")} {
-                reply $stype $starget "\002usage:\002 add $list <host|ip|last> <value1,value2..> \[comment\]"
-                continue;       
+            if {$ip eq "" || (![isValidIP $ip] && ![isValidIP [set ip [lindex [dns:lookup $ip] 0]]]) || ($method ne "ip" && $method ne "host")} {
+                reply $stype $starget "\002usage:\002 add $list <host|ip|last> <value1,value2..> \[type\] \[comment\]"
+                continue;
             }
 
             if {$list eq "dronebl"} {
-                set ttype [cfg:get dronebl:type $chan];
+                set ttype [rbl:type dronebl $given $chan]
                 if {[::dronebl::submit "$ttype $ip"]} {
                     debug 1 "arm:cmd:add: dronebl submit successful (ip: $ip, type: $ttype)"
-                    reply $type $target "DroneBL submit successful (\002ip:\002 $ip)"
+                    reply $type $target "DroneBL submit successful (\002ip:\002 $ip -- \002type:\002 $ttype)"
                 } else {
                     set error_msg [::dronebl::lasterror]
                     debug 1 "arm:cmd:add: dronebl submit failed (ip: $ip response: $error_msg)"
                     reply $type $target "DroneBL submit failed (\002ip:\002 $ip): $error_msg"
                 }
             } elseif {$list eq "ircbl"} {
-                set ttype [cfg:get ircbl:type $chan];
+                set ttype [rbl:type ircbl $given $chan]
                 set result [lindex [ircbl:query add $ip $ttype $comment] 1]
                 reply $type $target $result
                 continue;
@@ -7431,8 +7460,10 @@ proc arm:cmd:rem {0 1 2 3 {4 ""} {5 ""}} {
     } elseif {$ids eq "dronebl" || $ids eq "ircbl"} {
         set nodronebl 0; set noircbl 0;
         if {[info command ::dronebl::submit] eq "" || [userdb:get:level $user $chan] < [cfg:get dronebl:lvl $chan]} {
-            # -- DroneBL not loaded, or no access
-            set norbl 1
+            # -- DroneBL not loaded, or no access.  this used to set a variable nothing read
+            # -- (norbl), leaving nodronebl at 0, so the command fell through and called
+            # -- ::dronebl::lookup on a namespace that does not exist.
+            set nodronebl 1
         } else { append xtra "|dronebl" }
         
         if {![cfg:get ircbl $chan] || $globlevel < [cfg:get ircbl:lvl $chan]} {
@@ -7444,7 +7475,13 @@ proc arm:cmd:rem {0 1 2 3 {4 ""} {5 ""}} {
             reply $stype $starget "\002usage:\002 rem ?chan? <id>"
             return;
         }
-        
+
+        # -- having access to one list is not access to the other
+        if {($ids eq "dronebl" && $nodronebl) || ($ids eq "ircbl" && $noircbl)} {
+            reply $stype $starget "\002error:\002 $ids removals are not available (not loaded, not enabled, or insufficient access)."
+            return;
+        }
+
         if {$value eq ""} {
             reply $stype $starget "\002usage:\002 rem $ids <host|ip|las$xtra> <value1,value2..> \[type\]"
             return;             
@@ -7461,14 +7498,11 @@ proc arm:cmd:rem {0 1 2 3 {4 ""} {5 ""}} {
         
         # -- allow comma delimited
         foreach ip $loop {
-            if {$ip eq "" || (![isValidIP $ip] && {set ip [dns:lookup $ip]} eq "error") || ($method ne "ip" && $method ne "host")} {
+            if {$ip eq "" || (![isValidIP $ip] && ![isValidIP [set ip [lindex [dns:lookup $ip] 0]]]) || ($method ne "ip" && $method ne "host")} {
                 reply $stype $starget "\002usage:\002 rem $ids <value1,value2..> \[type\]"
-                continue;       
+                continue;
             }
-            if {$ttype eq "" || ![regexp -- {^\d+$} $ttype]} {
-                if {$ids eq "dronebl"} { set ttype [cfg:get dronebl:type $chan] } \
-                elseif {$ids eq "ircbl"} { set ttype [cfg:get ircbl:type $chan] }
-            }
+            set ttype [rbl:type $ids $ttype $chan]
 
             if {$ids eq "dronebl"} {
                 # -- check if entry exists
