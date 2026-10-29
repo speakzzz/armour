@@ -5,9 +5,70 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 291 tests across 26 suites at time of writing.
+code regresses. 304 tests across 27 suites at time of writing.
 
 Releases are listed newest first.
+
+---
+
+## Unreleased
+
+Further static checks: `cfg:get` names against the settings actually defined,
+procedure call sites against their signatures, `bind` targets against defined
+procedures, and registered commands against the help files. The first two came
+back clean; the last two did not.
+
+### Fixed
+
+- **`mode:rem:b` looked up global access on the wrong channel.** It read
+  `db:get level levels uid $uid cid 0`, while all eleven other global-level
+  lookups in the file use `cid 1`. `cid 0` is not a channel, so the query
+  matched no row and `$globlevel` came back empty — and `expr {"" < 500}` is 1
+  in Tcl, not an error — so the guard below always took `continue`. The effect:
+  when a ban placed by a **global** (`*`) blacklist entry was lifted, the
+  automatic removal of that entry never happened. Failed closed and silently,
+  so `(auto)` global entries accumulated.
+
+- **`note` read the level for an arbitrary channel.** `arm:cmd:note` passed its
+  cid filter as a single equals-joined word, which lands in `db:get`'s `source2`
+  with `value2` empty — and `db:get` adds its `AND` clause only when both are
+  set. The clause was dropped, so the query returned the level from whichever
+  `levels` row SQLite handed back first, for any channel. That value gates
+  `note:glob` in three places.
+
+- **Two binds named procedures that do not exist.** `bind msg - whois
+  arm::userdb:msg:whois` had no such proc — the five real `userdb:msg:*`
+  handlers all exist, this one never did — so `/msg <bot> whois` raised
+  `invalid command name` until `binds:sweep` unbound it, then did nothing at
+  all. `whois` is an alias of `info` and `userdb:cmd:whois` already exists for
+  exactly that, so the dead bind is gone and `whois` is registered alongside
+  `info`, reaching the same handler through the normal dispatcher.
+  `help/whois.help` had been describing a command that could not run.
+  `bind ctcp - TIME arm::ctcp:time` was the same: the block above it unbinds
+  eggdrop's own CTCP TIME handler and the comment says "rebind VERSION & TIME",
+  but only `ctcp:version` was ever written. `ctcp:time` is now implemented,
+  mirroring `ctcp:version`.
+
+- **`ctcp:version` was defined twice.** The copy at line 10393 only logged and
+  notified; the one further down actually answers the client, and being later in
+  the file it replaced the first at load. So the first was dead — and the worse
+  of the two — but two definitions of one procedure is a trap the moment the
+  file is reordered. Removed.
+
+### Added
+
+- Help files for the five registered commands that had none: `captcha`,
+  `chanlist`, `help`, `reload` and `time`.
+
+### Upgrade notes
+
+- `whois` needs adding to your own config to become available —
+  `set addcmd(whois) {  userdb    1          pub msg dcc  }` — since the patch
+  only updates `armour.conf.sample`.
+- `filecount` in `.version` must go from 134 to 139 for the five new help
+  files, or `update install` fetches a partial tree on other bots.
+- Global blacklist entries now really are removed when their ban is lifted.
+  Expect `(auto)` global entries to stop accumulating.
 
 ---
 
@@ -550,7 +611,7 @@ remaining hardening items.
 
 ## Not included / known open items
 
-These remain open as of revision 2026102802 above:
+These remain open as of the Unreleased section above:
 
 - **IRCBL support is not implemented.** `ircbl:query` is called in three places
   — `add ircbl`, `rem ircbl`, and the scan/ban path — but is defined nowhere in

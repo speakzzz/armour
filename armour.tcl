@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026102802"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026102803"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -7940,7 +7940,11 @@ proc arm:cmd:note {0 1 2 3 {4 ""} {5 ""}} {
     if {![cfg:get note $chan]} { reply $type $target "notes disabled by administrator."; return; }; # -- exit if notes not enabled
     if {![userdb:isAllowed $nick $cmd $chan $type]} { return; }
     lassign [db:get id,user users curnick $nick] uid user
-    set level [db:get level levels uid $uid cid=1]; # -- get global access
+    # -- the cid filter used to be written as a single word with an equals sign, so it landed in
+    # -- db:get's source2 with value2 empty; db:get only adds its AND clause when both are set,
+    # -- so the clause was dropped and this returned the level from whichever levels row came
+    # -- back first, for any channel.  It must be two words: the column, then the value.
+    set level [db:get level levels uid $uid cid 1]; # -- get global access
     
     # -- end default proc template
     set text $arg
@@ -10236,7 +10240,10 @@ proc mode:rem:b {nick uhost hand chan mode target} {
             set tchan [get:val list:chan $id]
             if {$tchan eq "*"} {
                 # -- if the entry is global, we need to check the user has global access to remove
-                set globlevel [lindex [db:get level levels uid $uid cid 0] 0]; # -- select level from levels where uid=$uid and cid=0
+                # -- global access lives on cid 1, not cid 0: with cid 0 this matched no row, and
+                # -- an empty $globlevel compares as less than any level (expr {"" < 500} is 1),
+                # -- so the guard below always took 'continue' and a global entry was never removed
+                set globlevel [lindex [db:get level levels uid $uid cid 1] 0]; # -- select level from levels where uid=$uid and cid=1
                 if {$globlevel < $userdb(cmd,rem,pub)} {
                     continue;
                 }
@@ -10347,12 +10354,10 @@ proc kicklock:rem {chan tmodes} {
 }
 
 # -- CTCP VERSION
-proc ctcp:version {nick uhost hand dest keyword text} {
-    putlog "ctcp:version: nick: $nick -- uhost: $uhost -- hand: $hand -- dest: $dest -- keyword: $keyword -- text: $text"
-    if {[string toupper $keyword] eq "VERSION"} { 
-        putquick "NOTICE @[arm::cfg:get chan:report] :Armour: received \002CTCP VERSION\002 from $nick!$uhost"
-    }
-}
+# -- a second, earlier definition of ctcp:version stood here.  It was dead: the one further down
+# -- this file is defined later and so replaced it at load, and unlike this one that version
+# -- actually answers the client.  Two definitions of the same proc is a trap if the file is ever
+# -- reordered, so the dead copy is removed rather than left in place.
 
 # -- AUTOTOPIC: raw: topic
 proc raw:topic {server cmd arg} {
@@ -12636,7 +12641,9 @@ namespace eval arm {
 bind msg - login arm::userdb:msg:login
 bind msg - logout arm::userdb:msg:logout
 bind msg - newpass arm::userdb:msg:newpass
-bind msg - whois arm::userdb:msg:whois
+# -- the msg bind for whois was removed: it named a proc that does not exist, so /msg <bot> whois
+# -- raised invalid command name until binds:sweep unbound it, then did nothing at all.  whois is
+# -- an alias of info (userdb:cmd:whois) and now reaches it through the addcmd dispatcher instead.
 bind msg - inituser arm::userdb:msg:inituser
 
 bind join - * { arm::coroexec arm::userdb:join    }
@@ -18685,6 +18692,19 @@ proc ctcp:version {nick uhost hand dest keyword args} {
     set reportchan [cfg:get chan:report]
     if {$reportchan ne ""} {
         putquick "NOTICE @$reportchan :Armour: \002CTCP VERSION\002 from $nick!$uhost"
+    }
+    return 1;
+}
+
+# -- eggdrop's built-in CTCP TIME handler is unbound above and "bind ctcp - TIME arm::ctcp:time"
+# -- put this one in its place -- except it was never written, so a CTCP TIME raised
+# -- invalid command name "arm::ctcp:time" until binds:sweep removed the bind, after which the
+# -- bot simply did not answer.  Mirrors ctcp:version.
+proc ctcp:time {nick uhost hand dest keyword args} {
+    putquick "NOTICE $nick :\001TIME [clock format [clock seconds] -format {%a %b %d %H:%M:%S %Y %Z}]\001"
+    set reportchan [cfg:get chan:report]
+    if {$reportchan ne ""} {
+        putquick "NOTICE @$reportchan :Armour: \002CTCP TIME\002 from $nick!$uhost"
     }
     return 1;
 }

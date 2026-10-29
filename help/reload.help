@@ -1,0 +1,4 @@
+%B%command:%B% reload -- %B%level:%B% %LEVEL% -- %B%usage:%B% reload
+reloads the whitelist, blacklist and user database from the database into memory, and reports
+the counts loaded.  an alias of 'load'.  this re-reads data only: use 'rehash' to re-read the
+config file, and 'restart' to restart the bot.

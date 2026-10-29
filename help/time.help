@@ -1,0 +1,4 @@
+%B%command:%B% time -- %B%level:%B% %LEVEL% -- %B%usage:%B% time <user>
+shows the current local time for a user, from the timezone they set with 'set tz'.
+reports an error when that user has no timezone set.  with the ninjas plugin loaded, a city
+name is accepted in place of a username.

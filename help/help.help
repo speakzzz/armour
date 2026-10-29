@@ -1,0 +1,4 @@
+%B%command:%B% help -- %B%level:%B% %LEVEL% -- %B%usage:%B% help [command]
+with no argument, lists the commands available to you.  with a command name, shows that
+command's usage.  when cfg(help:web) is set, replies also link the online documentation;
+cfg(help:webonly) makes the reply the link alone.

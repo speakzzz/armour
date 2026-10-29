@@ -1300,6 +1300,7 @@ set addcmd(access)      {  userdb    1          pub msg dcc  }
 set addcmd(cmds)        {  arm       1          pub msg dcc  }
 set addcmd(help)        {  arm       1          pub msg dcc  }
 set addcmd(info)        {  userdb    1          pub msg dcc  }
+set addcmd(whois)       {  userdb    1          pub msg dcc  }; # -- alias of info
 set addcmd(verify)      {  userdb    1          pub msg dcc  }
 set addcmd(lang)        {  userdb    1          pub msg dcc  }
 set addcmd(set)         {  userdb    1          pub msg dcc  }

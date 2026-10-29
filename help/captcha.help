@@ -1,0 +1,6 @@
+%B%command:%B% captcha -- %B%level:%B% %LEVEL% -- %B%usage:%B% captcha ?chan? <search|stats> [-days <num>] [-type <flags>] [-max <num>] [-nomatch]
+queries the CAPTCHA challenge log for a channel.  'stats' summarises outcomes; 'search'
+lists individual challenges.
+-days limits how far back to look, -max caps the number of results, -type filters by result
+flag, and -nomatch returns only challenges that were never completed.
+only relevant when web CAPTCHA is configured (cfg(captcha) and cfg(captcha:web:url)).
