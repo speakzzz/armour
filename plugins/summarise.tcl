@@ -487,20 +487,25 @@ proc summarise:errors {cfgurl tok error} {
 # -- arm::randfile [length] [chars]
 # -- length to use is provided by config option if not provided
 # -- chars to randomise are defaulted if not provided
-proc randfile {{ext "png"} {length ""} {chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"}} {
-    set dir [cfg:get ask:path]
-    if {$length eq ""} { set length 5 }
-    set range [expr {[string length $chars]-1}]
-    set avail 0
-    while {!$avail} {
-        set text ""
-        for {set i 0} {$i < $length} {incr i} {
-            set pos [expr {int(rand()*$range)}]
-            append text [string range $chars $pos $pos]
+# -- normally provided by the openai plugin; defined here too so this plugin works when
+# -- loaded on its own.  Without the guard, whichever of the two loaded second silently
+# -- replaced the other copy.
+if {[info commands randfile] eq ""} {
+    proc randfile {{ext "png"} {length ""} {chars "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"}} {
+        set dir [cfg:get ask:path]
+        if {$length eq ""} { set length 5 }
+        set range [expr {[string length $chars]-1}]
+        set avail 0
+        while {!$avail} {
+            set text ""
+            for {set i 0} {$i < $length} {incr i} {
+                set pos [expr {int(rand()*$range)}]
+                append text [string range $chars $pos $pos]
+            }
+            if {![file exists "$dir/$text.$ext"]} { set avail 1; break; }
         }
-        if {![file exists "$dir/$text.$ext"]} { set avail 1; break; }
+        return $text
     }
-    return $text
 }
 
 

@@ -5,7 +5,7 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 337 tests across 30 suites at time of writing.
+code regresses. 352 tests across 31 suites at time of writing.
 
 Releases are listed newest first.
 
@@ -52,6 +52,41 @@ guards, timeouts and token release.
 
 - `help/rem.help` had mixed CRLF and bare LF endings, left from a fuzzed hunk.
   Normalised to CRLF, matching `help/add.help`.
+
+- **`eggdrop.conf.sample` made every formatted timestamp wrong.** It built
+  `set env(TZ) "$timezone$offset"` from `timezone "UTC"` and `offset "+5"`, and
+  `env(TZ)` is what Tcl's `clock format` reads — so it decides the times Armour
+  prints in `showlog`, `note`, and anywhere else it formats a stored timestamp.
+  POSIX TZ offsets are inverted from the intuitive reading: `UTC+5` means five
+  hours *west* of UTC, so 17:14 UTC formatted as 12:14. A fixed numeric offset
+  also carries no daylight-saving rule, so for half the year everything is an
+  hour out — which is why `showlog` could report 12:14 for a command run at
+  13:14. The sample now sets `offset "0"` and `env(TZ) "UTC"` so the three
+  settings agree, with a comment explaining the sign inversion and naming IANA
+  zones to use instead. **Your own eggdrop conf needs the same change by hand.**
+
+- **`install.sh`:** `ARMOUR_LAODED` was a typo for `ARMOUR_LOADED`, so
+  `add_bot`'s reset never applied and the "is Armour loaded" state could go
+  stale; `deploy_from_file` took `$@` unquoted, re-splitting any path containing
+  a space; nine bare `cd` calls could leave the script running in the wrong
+  directory after a failure, with later steps writing there; `ask_yes` used
+  `return true`, which bash rejects with "numeric argument required" and a
+  return of 2, so both branches reported failure (no callers today, so latent);
+  and a local `extra` was set and never read. shellcheck now reports nothing at
+  warning level.
+
+- `deploy`'s `armSettings` includes `web`, which neither `.ini` sample
+  documented, so `deploy` wrote a `web=` line nothing described.
+
+- `randfile` was defined unguarded in both `openai.tcl` and `summarise.tcl`, so
+  whichever plugin loaded second silently replaced the other's copy. Harmless,
+  since the bodies are equivalent, but `ask:jsonesc` beside it is guarded and
+  this now matches. Every duplicate definition in the tree now has at most one
+  unguarded copy.
+
+- `update:config`'s summary printed the wrong variables on two lines: one tested
+  `$existrblcount` and printed `$new`, the other labelled a new count with
+  `$existrbltext`.
 
 - **`mode:rem:b` looked up global access on the wrong channel.** It read
   `db:get level levels uid $uid cid 0`, while all eleven other global-level

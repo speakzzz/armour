@@ -20384,9 +20384,9 @@ proc update:config {sampleconf newconf ghdata} {
 
     # -- count of RLBLs
     if {$existrblcount eq 1} { set existrbltext "RBL" } else { set existrbltext "RBLs" }
-    if {$existrblcount ne 0} { debug 0 "\002update:config:\002 \002$new\002 existing $existrbltext: [join $existrbls]" }
+    if {$existrblcount ne 0} { debug 0 "\002update:config:\002 \002$existrblcount\002 existing $existrbltext: [join $existrbls]" }
     if {$newrblcount eq 1} { set newrbltext "RBL" } else { set newrbltext "RBLs" }
-    if {$newrblcount ne 0} { debug 0 "\002update:config:\002 \002$newrblcount\002 new $existrbltext: [join $newrbls]" }
+    if {$newrblcount ne 0} { debug 0 "\002update:config:\002 \002$newrblcount\002 new $newrbltext: [join $newrbls]" }
 
     # -- count  of plugins
     if {$existplugincount eq 1} { set existplugintext "plugin" } else { set existplugintext "plugins" }

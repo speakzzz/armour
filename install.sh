@@ -497,7 +497,7 @@ download_eggdrop() {
 build_eggdrop() {
     ask_for_eggdrop_dir
     ohai "Building ${tty_bold}eggdrop ${EGGDROP_VER}${tty_reset} ..."
-    cd ${EGGDROP_DIR}
+    cd ${EGGDROP_DIR} || abort "could not change directory to ${EGGDROP_DIR}"
     ./configure --prefix=${EGGDROP_INSTALL_DIR}
     return_code=$?
     if [ ! $return_code -eq 0 ]; then
@@ -582,7 +582,7 @@ ask_for_network() {
 
 # -- setup eggdrop config file
 configure_eggdrop() {
-    cd ${EGGDROP_INSTALL_DIR}
+    cd ${EGGDROP_INSTALL_DIR} || abort "could not change directory to ${EGGDROP_INSTALL_DIR}"
     ohai "Configuring ${tty_bold}eggdrop${tty_reset} ..."
     echo
     ohai "Copying ${tty_green}armour/eggdrop.conf.sample${tty_reset} to ${tty_green}./${BOTNAME}.conf${tty_reset} ..."
@@ -598,7 +598,7 @@ configure_eggdrop() {
 
 # -- clone Armour from GitHub
 install_armour() {
-    cd ${EGGDROP_INSTALL_DIR}
+    cd ${EGGDROP_INSTALL_DIR} || abort "could not change directory to ${EGGDROP_INSTALL_DIR}"
     if [ -d "armour" ]; then
         # -- armour directory already exists
         ring_bell
@@ -628,7 +628,7 @@ install_armour() {
     echo
     ${GIT} clone ${ARMOUR_GIT}
     echo
-    cd armour
+    cd armour || abort "could not change directory to armour"
     ohai "Copying ${tty_green}armour/armour.conf.sample${tty_reset} to ${tty_green}armour/${BOTNAME}.conf${tty_reset} ..."
     echo
     cp armour.conf.sample ${BOTNAME}.conf
@@ -777,12 +777,14 @@ armour_setting() {
 
 ask_yes() {
     local input
-    echo $@
+    # -- bash has no "return true": it errors with "numeric argument required" and returns 2, so
+    # -- both branches used to report failure and any caller's yes-path was unreachable
+    echo "$@"
     getc input
     if [ "$input" == "y" ]; then
-        return true
+        return 0
     else
-        return false
+        return 1
     fi
 }
 
@@ -950,7 +952,7 @@ check_eggdrop_settings() {
     echo
 
     SETTING_LIST="uservar nick altnick botnet-nick username owner admin network realname offset vhost4 vhost6 net-type servers"
-    cd ${EGGDROP_INSTALL_DIR}
+    cd ${EGGDROP_INSTALL_DIR} || abort "could not change directory to ${EGGDROP_INSTALL_DIR}"
     EGGDROP_FILE="${BOTNAME}.conf"
 
     # -- read the config file
@@ -1097,7 +1099,7 @@ check_armour_settings() {
     SETTING_LIST="botname register register:inchan ircd znc realname servicehost prefix chan:nocmd chan:def chan:report auth:user auth:pass auth:totp auth:mech auth:serv:nick auth:serv:host xhost:ext auth:hide auth:rand auth:wait ban portscan"
     NOAUTH=0
     REGISTER=0
-    cd ${ARMOUR_INSTALL_DIR}
+    cd ${ARMOUR_INSTALL_DIR} || abort "could not change directory to ${ARMOUR_INSTALL_DIR}"
     ARMOUR_FILE="${BOTNAME}.conf"
 
     # -- read the config file
@@ -1381,9 +1383,10 @@ optional_support() {
 # -- start the eggdrop
 start_eggdrop() {
     local input
-    local extra
     input=
-    extra=
+    # -- an "extra" variable held "> /dev/null 2>&1" here and was never used: both launch lines
+    # -- below redirect unconditionally.  Removed rather than wired up, since using it would
+    # -- change what an interactive install shows on screen.
     if [[ $LAUNCH == "0" ]]; then
         echo
         ohai "Do you wish to start the eggdrop now? (${tty_green}Y${tty_reset})es or (${tty_green}N${tty_reset})o"
@@ -1391,14 +1394,13 @@ start_eggdrop() {
         getc input
     else
         # -- auto launch the eggdrop
-        extra="> /dev/null 2>&1"
         input="y"
     fi
 
     if [[ "${input}" == 'y' ]]; then
         ohai "Starting ${tty_green}eggdrop${tty_reset} from ${tty_green}${EGGDROP_INSTALL_DIR}${tty_reset}..."
         echo
-        cd ${EGGDROP_INSTALL_DIR}
+        cd ${EGGDROP_INSTALL_DIR} || abort "could not change directory to ${EGGDROP_INSTALL_DIR}"
         if [[ "$NEW_EGGDROP" == true || "$ADD_BOT" == true ]]; then
             echo "    ${tty_green}./eggdrop -m ${BOTNAME}.conf${tty_reset}"
             echo
@@ -1583,7 +1585,7 @@ load_armour() {
         load_armour
     fi
 
-    cd ${EGGDROP_INSTALL_DIR}
+    cd ${EGGDROP_INSTALL_DIR} || abort "could not change directory to ${EGGDROP_INSTALL_DIR}"
 
     # -- replace the line
     ohai "Uncommenting the ${tty_yellow}source armour/\$uservar.conf${tty_reset} line in ${tty_green}${EGGDROP_INSTALL_DIR}/${BOTNAME}.conf${tty_reset}"
@@ -1678,7 +1680,7 @@ deploy_from_file() {
         abort 
     fi
 
-    cd ..
+    cd .. || abort "could not change to the parent directory"
     EGGDROP_INSTALL_DIR=`pwd`
     EGGDROP_FILE="${EGGDROP_INSTALL_DIR}/${BOTNAME}.conf"
     if [ -f "${EGGDROP_FILE}" ]; then
@@ -1817,7 +1819,7 @@ deploy_from_file() {
     ohai "Done!"
     ADD_BOT=true
     NEW_EGGDROP=false
-    ARMOUR_LAODED=false
+    ARMOUR_LOADED=false;  # -- the name was misspelled here, so this reset never applied
     start_eggdrop
     if [ "$EGG_STARTED" == "1" ]; then
         ohai "${tty_green}Success!${tty_reset} eggdrop started."
@@ -1851,7 +1853,7 @@ if [[ $# -gt 0 ]]; then
         -i) install_bot ;;
         -l) load_armour ;;
         -a) add_bot ;;
-        -f) deploy_from_file $@ ;;
+        -f) deploy_from_file "$@" ;;
         *)
             warn "Unrecognized option: '$1'"
             usage 1

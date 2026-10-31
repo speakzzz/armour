@@ -40,8 +40,10 @@ set network "Undernet"
 # -- bot realname
 set realname "Armour -- https://armour.bot"
 
-# -- UTC time offset
-set offset "+5"
+# -- UTC time offset, used by eggdrop's own log timestamps.
+# -- NOTE: this is eggdrop's notion of the offset.  It does NOT set the timezone Tcl uses to
+# --       format times -- that comes from env(TZ) further down.  See the note there.
+set offset "0"
 
 # -- bot bind address for outgoing connection
 set vhost4 ""
@@ -60,7 +62,26 @@ set net-type "Undernet"
 set servers "irc.undernet.org"
 
 set timezone "UTC"
-set env(TZ) "$timezone$offset"
+
+# -- env(TZ) is what Tcl's [clock format] uses, so it decides the timestamps Armour prints in
+# -- showlog, note, and anywhere else it formats a stored time.
+#
+# -- This used to read:  set env(TZ) "$timezone$offset"   -- with timezone "UTC" and offset "+5".
+# -- Two problems with that form:
+# --   1. POSIX TZ offsets are INVERTED from the intuitive reading.  "UTC+5" means five hours
+# --      WEST of UTC, i.e. UTC-5.  So a user east of UTC who writes a positive offset gets a
+# --      time ten hours out, and "UTC" with any offset is self-contradictory anyway.
+# --   2. A fixed offset carries no daylight-saving rule, so for half the year every formatted
+# --      timestamp is an hour off.  This is why showlog could report 12:14 for a command run
+# --      at 13:14.
+#
+# -- Set an IANA zone name instead and both problems go away -- it knows its own offset and its
+# -- own DST rule.  For example:
+# --   set env(TZ) "America/New_York"
+# --   set env(TZ) "Europe/London"
+# --   set env(TZ) "Australia/Sydney"
+# -- Leave it as UTC if you would rather all timestamps be UTC.
+set env(TZ) "UTC"
 set prefer-ipv6 0
 set max-logs 20
 set max-logsize 0

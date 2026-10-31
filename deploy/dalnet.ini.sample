@@ -37,6 +37,7 @@ xhost:ext=""
 register=1
 register:inchan=""
 portscan=0
+web=0
 
 oidentd=1
 username=""
