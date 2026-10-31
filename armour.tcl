@@ -9815,7 +9815,7 @@ proc raw:endofwho {server cmd text} {
                         unset scan:list(who,$lchan)
                     } else {
                         # -- wholist is emtpy
-                        if {[info exists scan:list(nicks,$lchan)]} { debug 4 "\002endofwho:\002 4 - scan:list(who,$lchan) is empty!\002 clearing scan:list(nicks,$lchan)"; unset scan:list(nicks,$lchan) }
+                        if {[info exists scan:list(nicks,$lchan)]} { debug 4 "\002endofwho:\002 4 - scan:list(who,$lchan) is empty! clearing scan:list(nicks,$lchan)"; unset scan:list(nicks,$lchan) }
                     }
                     
                     if {$remove} {
@@ -14203,7 +14203,7 @@ proc userdb:cmd:register {0 1 2 3 {4 ""}  {5 ""}} {
     if {$xuser ne ""} {
         reply $type $target "registered user $tuser (\002uid:\002 $userid \002account:\002 $xuser)"
     } else {
-        reply $type $target "registered user $tuser. check /notice for temporary password \002(\002uid:\002 $userid\002)\002"
+        reply $type $target "registered user $tuser. check /notice for temporary password (\002uid:\002 $userid)"
         reply notc $target "Your temporary password is '$newpass'. Please login with \002/msg $botnick login $tuser $newpass\002, then change it using \002/msg $botnick newpass <newpassword>\002"
     }
 
@@ -14352,9 +14352,9 @@ proc userdb:cmd:newuser {0 1 2 3 {4 ""}  {5 ""}} {
     debug 1 "userdb:cmd:newuser: created user: $trguser (id: $userid -- xuser: $trgxuser -- level: $globlvl)"
     
     if {$trgxuser ne ""} {
-        reply $type $target "created user $trguser \002(uid:\002 $userid -- \002account:\002 $trgxuser -- \002global level:\002 $globlvl)\002"
+        reply $type $target "created user $trguser (\002uid:\002 $userid -- \002account:\002 $trgxuser -- \002global level:\002 $globlvl)"
     } else {
-        reply $type $target "created user $trguser \002(uid:\002 $userid -- \002global level:\002 $globlvl)\002 -- temporary password sent via /notice."
+        reply $type $target "created user $trguser (\002uid:\002 $userid -- \002global level:\002 $globlvl) -- temporary password sent via /notice."
         reply notc $nick "\002note:\002 temporary password for user \002$trguser\002 is: $genpass"
     }
     
@@ -14428,7 +14428,7 @@ proc userdb:cmd:deluser {0 1 2 3 {4 ""}  {5 ""}} {
 
     userdb:deluser $tuser $tuid; # -- delete the actual user
 
-    reply $type $target "done. user \002$tuser\002 has been eradicated \002(uid:\002 $tuid)\002"
+    reply $type $target "done. user \002$tuser\002 has been eradicated (\002uid:\002 $tuid)"
     
     # -- create log entry for command use
     log:cmdlog BOT * 1 $user $uid [string toupper $cmd] [string trim $arg] $source "" "" ""
@@ -15370,7 +15370,9 @@ proc userdb:get:level {user {chan ""}} {
         # -- userid
         set uid $user
     } else {
-        set dbuser [string tolower [db:escape $user]]
+        # -- escape outermost: identical output either way (db:escape only doubles quotes, which
+        # -- string tolower does not touch), and it keeps tests/sql.test's ratchet able to see it
+        set dbuser [db:escape [string tolower $user]]
         set uid [lindex [db:query "SELECT id FROM users WHERE lower(user)='$dbuser'"] 0]
         if {$uid eq ""} { return 0; }
     }
@@ -16198,35 +16200,12 @@ proc userdb:isIgnored {nick cid} {
     return 0; # -- fallback
 }
 
-# -- return the channel to use, when not specified in a msg/dcc command
-proc userdb:userchan {$user} {
-    variable cfg
-    db:connect
-    set dbuser [db:escape [string tolower $user]]
-    set uid [lindex [db:query "SELECT id FROM users WHERE lower(user)='$dbuser'"] 0]
-    
-    # -- return detaulf it the user is invalid
-    if {$uid eq ""} { db:close; return [cfg:get chan:def *]; }
-    
-    # -- get their channels
-    set rows [db:query "SELECT cid,level FROM channels WHERE uid='$uid'"]
-    set count 0; set highest(chan) ""; set highest(last) 0
-    set global(is) 0; set global(level) 0;
-    foreach row $rows {
-        incr count
-        lassign $row cid level
-        if {$cid eq 1} { set global(is) 1; set global(level) $level }
-        set chan [lindex [db:query "SELECT chan FROM channels WHERE id='$cid'"] 0]
-        # -- track the [non-global] channel where the user has the highest access
-        if {$level > $highest(last) && $cid != 1} { set highest(chan) $chan }
-    }
-    
-    # -- if there's only one chan they have access to, just use the default
-    if {$count eq 1} { db:close; return [cfg:get chan:def *] }
-    
-    # -- otherwise (they have access to multiple chans), return the one with highest level
-    return $highest(chan);
-}
+# -- userdb:userchan stood here: an unused second attempt at "which channel did they mean?", with
+# -- no callers anywhere.  userdb:get:chan is the live one.  It could never have run: its formal
+# -- parameter was written {$user}, with a literal dollar sign, so the body read an undefined
+# -- variable; it selected cid and level FROM channels, where neither column exists (they are in
+# -- levels) and db:query does not catch the resulting "no such column" error; and one return path
+# -- skipped db:close.  Removed rather than fixed, since nothing wants it.
 
 
 
@@ -20029,7 +20008,7 @@ proc update:install {update {local 0}} {
     }
     
     set runtime [expr [unixtime] - $start]
-    debug 0 "\002update:install:\002 script \002installation complete\002 (\002runtime:\002 $runtime secs\002)"
+    debug 0 "\002update:install:\002 script \002installation complete\002 (\002runtime:\002 $runtime secs)"
     if {$debug} { set text "tested" } else { set text "complete" }
 
     # -- form the note
@@ -20382,25 +20361,25 @@ proc update:config {sampleconf newconf ghdata} {
 
     # - count of settings
     if {$new eq 1} { set settext "setting" } else { set settext "settings" }
-    if {$new ne 0} { debug 0 "\002update:config:\002 \002$new\002 new config $settext: [join $newsettings]\002" }
+    if {$new ne 0} { debug 0 "\002update:config:\002 \002$new\002 new config $settext: [join $newsettings]" }
 
     # -- count of ports
     if {$existportcount eq 1} { set existporttext "port" } else { set existporttext "ports" }
-    if {$existportcount ne 0} { debug 0 "\002update:config:\002 \002$existportcount\002 existing $existporttext: [join $existports]\002" }
+    if {$existportcount ne 0} { debug 0 "\002update:config:\002 \002$existportcount\002 existing $existporttext: [join $existports]" }
     if {$newportcount eq 1} { set newporttext "port" } else { set newporttext "ports" }
-    if {$newportcount ne 0} { debug 0 "\002update:config:\002 \002$newportcount\002 new $newporttext: [join $newports]\002" }
+    if {$newportcount ne 0} { debug 0 "\002update:config:\002 \002$newportcount\002 new $newporttext: [join $newports]" }
 
     # -- count of RLBLs
     if {$existrblcount eq 1} { set existrbltext "RBL" } else { set existrbltext "RBLs" }
-    if {$existrblcount ne 0} { debug 0 "\002update:config:\002 \002$new\002 existing $existrbltext: [join $existrbls]\002" }
+    if {$existrblcount ne 0} { debug 0 "\002update:config:\002 \002$new\002 existing $existrbltext: [join $existrbls]" }
     if {$newrblcount eq 1} { set newrbltext "RBL" } else { set newrbltext "RBLs" }
-    if {$newrblcount ne 0} { debug 0 "\002update:config:\002 \002$newrblcount\002 new $existrbltext: [join $newrbls]\002" }
+    if {$newrblcount ne 0} { debug 0 "\002update:config:\002 \002$newrblcount\002 new $existrbltext: [join $newrbls]" }
 
     # -- count  of plugins
     if {$existplugincount eq 1} { set existplugintext "plugin" } else { set existplugintext "plugins" }
-    if {$existplugincount ne 0} { debug 0 "\002update:config:\002 \002$existplugincount\002 existing $existplugintext: [join $existplugins]\002" }
+    if {$existplugincount ne 0} { debug 0 "\002update:config:\002 \002$existplugincount\002 existing $existplugintext: [join $existplugins]" }
     if {$newplugincount eq 1} { set newplugintext "plugin" } else { set newplugintext "plugins" }
-    if {$newplugincount ne 0} { debug 0 "\002update:config:\002 \002$newplugincount\002 new $newplugintext: [join $newplugins]\002" }
+    if {$newplugincount ne 0} { debug 0 "\002update:config:\002 \002$newplugincount\002 new $newplugintext: [join $newplugins]" }
 
     # -- return the results
     dict set merge new $new

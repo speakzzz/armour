@@ -5,7 +5,7 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 304 tests across 27 suites at time of writing.
+code regresses. 316 tests across 28 suites at time of writing.
 
 Releases are listed newest first.
 
@@ -55,6 +55,22 @@ back clean; the last two did not.
   of the two — but two definitions of one procedure is a trap the moment the
   file is reordered. Removed.
 
+- **`userdb:userchan` was dead code that could never have run.** No callers
+  anywhere; `userdb:get:chan` (39 callers) is the live "which channel did they
+  mean?". In 25 lines it had three faults: its formal parameter was written
+  `{$user}`, with a literal dollar sign, so the body read an undefined variable;
+  it selected `cid,level FROM channels`, where none of `cid`, `level` or `uid`
+  exist (they are in `levels`) and `db:query` does not catch the resulting
+  "no such column" error; and one `return` path skipped `db:close`. Removed
+  rather than fixed, since nothing wants it.
+
+- **Thirteen output lines left IRC bold open**, carrying an odd number of
+  `\002` so the bold ran to the end of the line. Four are user-facing replies —
+  `register`, `adduser` (twice) and `deluser` — where the "(uid: N)" suffix was
+  written `\002(\002uid:\002 $userid\002)\002`. They now use the form the rest
+  of the file uses: plain parentheses, bold label. The other nine are `debug`
+  lines in `update:config`, `update:install` and the WHO handler.
+
 ### Added
 
 - Help files for the five registered commands that had none: `captcha`,
@@ -69,6 +85,7 @@ back clean; the last two did not.
   files, or `update install` fetches a partial tree on other bots.
 - Global blacklist entries now really are removed when their ban is lifted.
   Expect `(auto)` global entries to stop accumulating.
+
 
 ---
 
