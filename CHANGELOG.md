@@ -5,7 +5,7 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 327 tests across 29 suites at time of writing.
+code regresses. 337 tests across 30 suites at time of writing.
 
 Releases are listed newest first.
 
@@ -15,10 +15,43 @@ Releases are listed newest first.
 
 Further static checks: `cfg:get` names against the settings actually defined,
 procedure call sites against their signatures, `bind` targets against defined
-procedures, and registered commands against the help files. The first two came
-back clean; the last two did not.
+procedures, registered commands against the help files, and HTTP call sites for
+guards, timeouts and token release.
 
 ### Fixed
+
+- **Three HTTP calls were never guarded, despite appearing to be.** The timezone
+  lookups in `moduser`, `set` and `time` were written
+  `if {[catch "set tok [http::geturl …]" error]}` with a *double-quoted* catch
+  script. Tcl substitutes `[...]` inside `"..."` while evaluating `catch`'s own
+  arguments, so `http::geturl` ran before `catch` was invoked and the error
+  escaped uncaught. Each also had no timeout, and each error branch called
+  `http::cleanup` on a `$tok` that may never have been assigned — the same fault
+  fixed at ten other sites in revision 2026092600, which this form hid from that
+  pass. All three are now braced, timed, and clean up only a token that exists.
+  No other quoted `catch` in the tree contains a substitution.
+
+- **Fourteen synchronous HTTP calls had no timeout.** eggdrop is
+  single-threaded, so one of these blocks the whole bot — every channel, every
+  command — until the OS abandons the connection. Tcl's default is `-timeout 0`,
+  meaning wait forever, and nothing sets a global default: `http::config` is only
+  ever called with `-useragent`. 18 of the 32 call sites already passed
+  `-timeout`, so these were stragglers rather than a decision. `weathergov` was
+  the worst case, with four chained requests in one command.
+
+- **`packages/libdronebl.tcl` never called `http::cleanup`** — two `geturl`
+  calls, zero cleanups — so every DroneBL submit and lookup leaked the token and
+  its socket for the life of the process. `talk` now also reports a request that
+  did not complete rather than returning an empty body its caller would surface
+  as "unknown response", and `classes` stops reading the response body a second
+  time after unregistering the handler.
+
+- `plugins/push.tcl` was missing `set tok ""` before its guarded `geturl` — one
+  line of the 2026092600 HTTP fixes that never reached the repository, which
+  `tests/http.test` had been failing on.
+
+- `help/rem.help` had mixed CRLF and bare LF endings, left from a fuzzed hunk.
+  Normalised to CRLF, matching `help/add.help`.
 
 - **`mode:rem:b` looked up global access on the wrong channel.** It read
   `db:get level levels uid $uid cid 0`, while all eleven other global-level

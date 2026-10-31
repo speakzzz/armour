@@ -95,7 +95,9 @@ proc weather:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
     http::register https 443 [list ::tls::socket -autoservername true]
     set query [http::formatQuery q $city appid $api_key lang en units $units]
 
-	if {[catch {http::geturl https://api.openweathermap.org/data/2.5/weather?$query} tok]} {
+	# -- -timeout: synchronous call in a single-threaded bot, so an unresponsive API would
+	# -- otherwise block every channel until the OS gave up
+	if {[catch {http::geturl https://api.openweathermap.org/data/2.5/weather?$query -timeout 5000} tok]} {
 		debug 0 "\002cmd:cmd:weather:\002 socket error: $tok"
 		return;
 	}
@@ -178,7 +180,7 @@ proc weather:cmd:weather {0 1 2 3 {4 ""} {5 ""}} {
 
     # -- fetch detailed forecast
     set url "https://api.openweathermap.org/data/3.0/onecall?lat=${lat}&lon=${lon}&exclude=minutely,hourly&appid=${api_key}&units=${units}"
-    set response [::http::geturl $url]
+    set response [::http::geturl $url -timeout 5000]
 
     if {[::http::status $response] ne "ok"} {
         reply $type $target "\002error:\002 HTTP error: [http::ncode $response]"

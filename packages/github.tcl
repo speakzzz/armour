@@ -128,7 +128,9 @@ proc ::github::files {files dir num dirs branch {token ""}} {
     if {$token eq ""} {
         set headers [list]
     } else { set headers [list Authorization [list Bearer $token]] }
-    set tok [http::geturl $file -headers $headers -channel $f]
+    # -- -timeout: this downloads one file per call during `update install`, synchronously, so
+    # -- a stalled connection would hang the bot mid-update.  Generous, since files can be large.
+    set tok [http::geturl $file -headers $headers -channel $f -timeout 30000]
     set Stat [::http::status $tok]
     flush $f
     close $f

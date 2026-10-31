@@ -218,7 +218,9 @@ proc sms:cmd:sms {0 1 2 3 {4 ""}  {5 ""}} {
     sms:debug 0 "sms:pub:sms: sending SMS query: $sms(cfg.sms.url)?$query"
     #sms:reply $type $target "connecting to gateway..."
     
-    catch {set tok [http::geturl $sms(cfg.sms.url) -query $query -keepalive 1]} error
+    # -- $tok defined first, and -timeout so a dead endpoint cannot block the single-threaded bot
+    set tok ""
+    catch {set tok [http::geturl $sms(cfg.sms.url) -query $query -keepalive 1 -timeout 10000]} error
     set ncode [http::ncode $tok]
     set status [http::status $tok]
     set token $tok

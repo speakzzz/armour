@@ -68,7 +68,9 @@ proc climate:cmd:climate {0 1 2 3 {4 ""} {5 ""}} {
     set headers [list User-Agent "ArmourWeatherPlugin/1.7 ($::botnick on $::network)"]
     set geo_query [http::formatQuery q $location key $apikey]
 
-    if {[catch {http::geturl "https://api.opencagedata.com/geocode/v1/json?$geo_query" -headers $headers} tok]} {
+    # -- -timeout on each of this command's four chained requests: without it one unresponsive
+    # -- hop blocks the whole bot, and there are four chances of that per invocation
+    if {[catch {http::geturl "https://api.opencagedata.com/geocode/v1/json?$geo_query" -headers $headers -timeout 5000} tok]} {
         reply $type $target "\002error:\002 Could not connect to OpenCage geocoding service."
         return
     }
@@ -96,7 +98,7 @@ proc climate:cmd:climate {0 1 2 3 {4 ""} {5 ""}} {
     set lon [dict get $geometry "lng"]
     set display_name [dict get $first_result "formatted"]
 
-    if {[catch {http::geturl "https://api.weather.gov/points/$lat,$lon" -headers $headers} tok]} {
+    if {[catch {http::geturl "https://api.weather.gov/points/$lat,$lon" -headers $headers -timeout 5000} tok]} {
         reply $type $target "\002error:\002 Could not connect to weather.gov API."
         return
     }
@@ -119,7 +121,7 @@ proc climate:cmd:climate {0 1 2 3 {4 ""} {5 ""}} {
             set new_points_url "https://api.weather.gov$new_points_url"
         }
         
-        if {[catch {http::geturl $new_points_url -headers $headers} tok]} {
+        if {[catch {http::geturl $new_points_url -headers $headers -timeout 5000} tok]} {
             reply $type $target "\002error:\002 Could not follow API redirect to $new_points_url"
             return
         }
@@ -142,7 +144,7 @@ proc climate:cmd:climate {0 1 2 3 {4 ""} {5 ""}} {
         return
     }
 
-    if {[catch {http::geturl $forecast_url -headers $headers} tok]} {
+    if {[catch {http::geturl $forecast_url -headers $headers -timeout 5000} tok]} {
         reply $type $target "\002error:\002 Could not retrieve forecast data."
         return
     }

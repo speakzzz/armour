@@ -14903,10 +14903,15 @@ proc userdb:cmd:moduser {0 1 2 3 {4 ""}  {5 ""}} {
         package require json
         package require http
         # list timezones: http://worldtimeapi.org/api/timezones
-        if {[catch "set tok [http::geturl http://worldtimeapi.org/api/timezones]" error]} {
+        # -- the catch script must be BRACED: with "..." the [http::geturl] is substituted
+        # -- before catch is even invoked, so the error escaped uncaught.  -timeout stops a
+        # -- dead API from blocking the whole bot, and $tok is defined first so the failure
+        # -- path below cannot read it unset.
+        set tok ""
+        if {[catch {set tok [http::geturl http://worldtimeapi.org/api/timezones -timeout 5000]} error]} {
             debug 0 "\002userdb:cmd:moduser:\002 HTTP error: $error"
             reply $type $target "\002error:\002 $error"
-            http::cleanup $tok
+            if {$tok ne ""} { http::cleanup $tok }
             return;
         }
         set json [http::data $tok]
@@ -15082,10 +15087,12 @@ proc userdb:cmd:set {0 1 2 3 {4 ""}  {5 ""}} {
         package require json
         package require http
         # list timezones: http://worldtimeapi.org/api/timezones
-        if {[catch "set tok [http::geturl http://worldtimeapi.org/api/timezones]" error]} {
+        # -- braced catch, timeout, and $tok defined first: see userdb:cmd:moduser above
+        set tok ""
+        if {[catch {set tok [http::geturl http://worldtimeapi.org/api/timezones -timeout 5000]} error]} {
             debug 0 "\002userdb:cmd:set:\002 HTTP error: $error"
             reply $type $target "\002error:\002 $error"
-            http::cleanup $tok
+            if {$tok ne ""} { http::cleanup $tok }
             return;
         }
         set json [http::data $tok]
@@ -16508,10 +16515,12 @@ proc userdb:cmd:time {0 1 2 3 {4 ""}  {5 ""}} {
     package require http
     # list timezones: http://worldtimeapi.org/api/timezones
     # output data for timezone: http://worldtimeapi.org/api/timezone/Australia/Sydney
-    if {[catch "set tok [http::geturl http://worldtimeapi.org/api/timezone/$tz]" error]} {
+    # -- braced catch, timeout, and $tok defined first: see userdb:cmd:moduser above
+    set tok ""
+    if {[catch {set tok [http::geturl http://worldtimeapi.org/api/timezone/$tz -timeout 5000]} error]} {
         debug 0 "\002userdb:cmd:time:\002 HTTP error: $error"
         reply $type $target "\002error:\002 $error"
-        http::cleanup $tok
+        if {$tok ne ""} { http::cleanup $tok }
         return;
     }
 

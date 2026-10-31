@@ -67,9 +67,15 @@ proc host2ip {ip {host 0} {status 0} {attempt 0}} {
 proc talk { query } {
 	[namespace current]::setHTTPheaders
 	::http::register https 443 tls::socket
-	set http [::http::geturl "https://dronebl.org/rpc2" -type "text/xml" -query $query]
+	# -- -timeout: this is a synchronous request and eggdrop is single-threaded, so without one an
+	# -- unresponsive dronebl.org blocks every channel until the OS gives up
+	set http [::http::geturl "https://dronebl.org/rpc2" -type "text/xml" -query $query -timeout 10000]
+	set status [::http::status $http]
 	set data [::http::data $http]
+	# -- release the token and its socket: this proc never did, so every submit and lookup leaked one
+	::http::cleanup $http
 	::http::unregister https
+	if {$status ne "ok"} { return "request did not complete: $status" }
 	return $data
 }
 
@@ -263,10 +269,13 @@ proc records {{txt ""}} {
 proc classes {{txt ""}} {
 	[namespace current]::setHTTPheaders
 	::http::register https 443 tls::socket
-	set http [::http::geturl "https://dronebl.org/classes?format=txt"]
+	set http [::http::geturl "https://dronebl.org/classes?format=txt" -timeout 10000]
 	set data [::http::data $http]
+	# -- release the token, and use the body already read rather than fetching it from the token a
+	# -- second time (which happened after the unregister below)
+	::http::cleanup $http
 	::http::unregister https
-	set res [regexp -linestop -inline -all {.+} [::http::data $http]]
+	set res [regexp -linestop -inline -all {.+} $data]
 
 	set classlist {{Class Description}}
 

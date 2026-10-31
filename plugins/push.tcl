@@ -212,7 +212,11 @@ proc push:cmd:push {0 1 2 3 {4 ""}  {5 ""}} {
 
     push:debug 0 "push:pub:push: sending push query: $push(cfg.push.url)?$query"
     
-    catch {set tok [http::geturl $push(cfg.push.url) -query $query -keepalive 1]} error
+    # -- $tok defined first so the failure paths below cannot read it unset, and -timeout so a
+    # -- dead endpoint does not block the bot: eggdrop is single-threaded and this call is
+    # -- synchronous, so with no timeout it waits as long as the OS allows
+    set tok ""; # -- so a failed request leaves $tok defined
+    catch {set tok [http::geturl $push(cfg.push.url) -query $query -keepalive 1 -timeout 10000]} error
         push:debug 1 "push:pub:push: checking for errors...(error: $error)"
         if {[string match -nocase "*couldn't open socket*" $error]} {
             push:debug 0 "push:pub:push: could not open socket to: $push(cfg.push.url)"
