@@ -5,7 +5,7 @@ see the **Security** headings and upgrade promptly.
 
 Every change ships with a `tcltest` suite under `tests/` (run `./tests/run.sh`).
 The suites load the real procedures out of `armour.tcl`, so they fail if the
-code regresses. 316 tests across 28 suites at time of writing.
+code regresses. 327 tests across 29 suites at time of writing.
 
 Releases are listed newest first.
 
@@ -64,6 +64,35 @@ back clean; the last two did not.
   "no such column" error; and one `return` path skipped `db:close`. Removed
   rather than fixed, since nothing wants it.
 
+- **The `weather` command could never load.** Its plugin-dependency guard read
+  `if {[info commands arm:cmd:weather] eq ""}`, and `arm:cmd:weather` exists
+  nowhere — `plugins/weather.tcl` defines `weather:cmd:weather` and registers it
+  under prefix `weather`. The guard was therefore always true and
+  `addcmd(weather)` was unset on every start, plugin loaded or not, while
+  `addcmd(w)` — registered beside it — was left alone. That asymmetry is the
+  tell: `w` has been working and `weather` has not, for the same handler. Same
+  family as the dependency-block ordering bug in revision 2026092600; this one
+  survived that fix because it tests a name nothing defines. The sample config
+  also declared the entry under prefix `arm`, which the plugin overrode at load.
+
+- **`cfg(weather:key)` was two different API keys sharing one name.** The sample
+  declared it twice, thirteen lines apart — once for openweathermap.org, once
+  for opencagedata.com — and the second won. The two plugins read it as
+  different things: `weather.tcl` wants an OpenWeatherMap key for forecasts,
+  `weathergov.tcl` wants an OpenCage key to geocode a place name. With both
+  loaded, whichever key you set, the other plugin received a key for a service
+  it was not talking to and failed with an authentication error from the far end
+  rather than anything pointing at the config. The geocoding key is now
+  `cfg(weather:geo:key)`; `conf:sensitive`'s `*:key` suffix rule already covers
+  it, so `conf` will not echo it to a channel.
+
+- **`report`'s fallback guard tested a qualified name from inside its own
+  namespace.** `if {[info commands "arm::report"] eq ""}` runs inside
+  `namespace eval arm`, so it resolves against `::arm` — `::arm::arm::report` —
+  which never exists. The guard always fired and the fallback was always
+  defined, harmless only because the real `report` later in the file replaced
+  it. `debug`'s guard four lines above tests the unqualified name correctly.
+
 - **Thirteen output lines left IRC bold open**, carrying an odd number of
   `\002` so the bold ran to the end of the line. Four are user-facing replies —
   `register`, `adduser` (twice) and `deluser` — where the "(uid: N)" suffix was
@@ -85,6 +114,10 @@ back clean; the last two did not.
   files, or `update install` fetches a partial tree on other bots.
 - Global blacklist entries now really are removed when their ban is lifted.
   Expect `(auto)` global entries to stop accumulating.
+- **If you use the weathergov plugin, move your OpenCage key to the new
+  setting**: `conf weather:geo:key <key>`, and set `cfg(weather:key)` to your
+  openweathermap.org key. Until then weathergov reports its key as unset.
+- `weather` starts working after a rehash; it has never worked before.
 
 
 ---

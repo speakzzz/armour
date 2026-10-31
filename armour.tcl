@@ -1045,7 +1045,7 @@ namespace eval arm {
 # ------------------------------------------------------------------------------------------------
 
 # -- this revision is used to match the DB revision for use in upgrades and migrations
-set cfg(revision) "2026103100"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
+set cfg(revision) "2026103101"; # -- YYYYMMDDNN (allows for 100 revisions in a single day)
 set cfg(version) "v5.1-custom";        # -- script version
 #set cfg(version) "v[lindex [exec grep version ./armour/.version] 1]"; # -- script version
 #set cfg(revision) [lindex [exec grep revision ./armour/.version] 1];  # -- YYYYMMDDNN (allows for 100 revisions in a single day)
@@ -4239,7 +4239,11 @@ if {[info commands "debug"] eq ""} {
 }
 
 
-if {[info commands "arm::report"] eq ""} {
+# -- unqualified, like the debug guard above: this block runs inside "namespace eval arm", so the
+# -- qualified name "arm::report" resolved against ::arm, i.e. ::arm::arm::report, which never
+# -- exists.  The guard therefore always fired and this fallback was always defined -- harmless
+# -- only because the real report later in the file replaced it.
+if {[info commands report] eq ""} {
     # -- only create if not already loaded
     proc report {type target string {chan ""} {chanops "1"}} {
         variable scan:full; # -- stores data when channel scan in progress (arrays: chan,<chan> and count,<chan>)
@@ -20806,8 +20810,14 @@ if {[info commands humour:cmd] eq ""} {
 }
 
 # -- disable commands if `weather` plugin not loaded
-if {[info commands arm:cmd:weather] eq ""} {
+# -- this used to test arm:cmd:weather, which does not exist and never did: the plugin defines
+# -- weather:cmd:weather (prefix "weather", as its own addcmd lines declare).  So the guard was
+# -- always true and addcmd(weather) was unset on every start, loaded or not -- while addcmd(w),
+# -- which the plugin registers alongside it, was left in place.  Hence `w` worked and `weather`
+# -- did not.  Both are stripped together now, and only when the plugin really is absent.
+if {[info commands weather:cmd:weather] eq ""} {
     if {[info exists addcmd(weather)]} { unset addcmd(weather) }
+    if {[info exists addcmd(w)]} { unset addcmd(w) }
 }
 
 # -- disable commands if `seen` plugin not loaded

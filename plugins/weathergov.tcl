@@ -59,9 +59,9 @@ proc climate:cmd:climate {0 1 2 3 {4 ""} {5 ""}} {
     }
 
     # --- Geocoding via OpenCage API ---
-    set apikey [cfg:get weather:key]
+    set apikey [cfg:get weather:geo:key]
     if {$apikey eq ""} {
-        reply $type $target "\002error:\002 OpenCage API key is not set in armour.conf. Please add: set cfg(weather:key) \"YOUR_KEY\""
+        reply $type $target "\002error:\002 OpenCage API key is not set in armour.conf. Please add: set cfg(weather:geo:key) \"YOUR_KEY\""
         return
     }
     http::register https 443 [list ::tls::socket -autoservername true]

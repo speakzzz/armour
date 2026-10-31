@@ -1038,10 +1038,13 @@ set cfg(weather:precise) 0
 
 
 # ------------------------------------------------------------------------------------------------
-# --- OpenCage API Key for Weather Plugin ---
+# --- OpenCage geocoding API key, used by the weathergov plugin ---
 # Get a free key from https://opencagedata.com/api
+# -- NOTE: this is NOT the same key as cfg(weather:key) above, which is openweathermap.org for the
+# --       weather plugin.  Both used to be called weather:key, so whichever was declared second
+# --       won and one of the two plugins always received a key for the wrong service.
 # ------------------------------------------------------------------------------------------------
-set cfg(weather:key) "YOUR_OPENCAGE_API_KEY_HERE"
+set cfg(weather:geo:key) "YOUR_OPENCAGE_API_KEY_HERE"
 
 # ------------------------------------------------------------------------------------------------
 # NINJAS PLUGIN -- settings only relevant if optional plugin is loaded: ninjas
@@ -1290,7 +1293,7 @@ set addcmd(history)     {  arm       1          pub msg dcc  }; # -- requires ni
 set addcmd(fact)        {  arm       1          pub msg dcc  }; # -- requires ninjas plugin
 set addcmd(chuck)       {  arm       1          pub msg dcc  }; # -- requires ninjas plugin
 set addcmd(cocktail)    {  arm       1          pub msg dcc  }; # -- requires ninjas plugin
-set addcmd(weather)     {  arm       1          pub msg dcc  }; # -- requires weather plugin
+set addcmd(weather)     {  weather   1          pub msg dcc  }; # -- requires weather plugin
 #set addcmd(meme)        {  arm       1          pub msg dcc  }; # -- requires humour plugin
 set addcmd(gif)         {  arm       1          pub msg dcc  }; # -- requires humour plugin
 set addcmd(praise)      {  arm       1          pub msg dcc  }; # -- requires humour plugin
